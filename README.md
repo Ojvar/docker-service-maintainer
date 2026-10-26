@@ -19,6 +19,7 @@ cargo build --release
 | `HOST`           | no       | `0.0.0.0` | Interface to bind to                            |
 | `SECURITY_TOKEN` | yes      |           | Value expected in the `x-security-token` header |
 | `SCRIPTS_DIR`    | no       | `scripts` | Folder containing the `.sh` scripts             |
+| `BASE_PATH`      | no       | (empty)   | Public prefix behind a proxy, e.g. `/maintain`, so Swagger works |
 
 ## Scripts
 

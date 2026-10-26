@@ -13,6 +13,9 @@ pub struct Config {
     pub security_token: String,
     /// Directory holding the `<service>.sh` scripts (`SCRIPTS_DIR`, default `scripts`).
     pub scripts_dir: PathBuf,
+    /// Public path prefix added by a reverse proxy, e.g. `/maintain` (`BASE_PATH`, default empty).
+    /// Only used so Swagger UI and the spec point at the proxied URLs.
+    pub base_path: String,
 }
 
 impl Config {
@@ -41,8 +44,15 @@ impl Config {
                 .map_err(|_| "PORT must be a valid number".to_string())?,
             security_token,
             scripts_dir: get("SCRIPTS_DIR").unwrap_or_else(|| "scripts".into()).into(),
+            base_path: normalize_base_path(&get("BASE_PATH").unwrap_or_default()),
         })
     }
+}
+
+/// Turns `maintain`, `/maintain/` or `/maintain` into `/maintain`; blank or `/` into ``.
+fn normalize_base_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() { String::new() } else { format!("/{trimmed}") }
 }
 
 #[cfg(test)]
@@ -77,6 +87,16 @@ mod tests {
         let config = load(&[("PORT", "8080"), ("SECURITY_TOKEN", "secret")]).unwrap();
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.scripts_dir, PathBuf::from("scripts"));
+        assert_eq!(config.base_path, "");
+    }
+
+    #[test]
+    fn normalizes_base_path() {
+        for raw in ["/maintain", "maintain", "/maintain/", " /maintain "] {
+            let config = load(&[("PORT", "1"), ("SECURITY_TOKEN", "s"), ("BASE_PATH", raw)]).unwrap();
+            assert_eq!(config.base_path, "/maintain");
+        }
+        assert_eq!(normalize_base_path("/"), "");
     }
 
     #[test]

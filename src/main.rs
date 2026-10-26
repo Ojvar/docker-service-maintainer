@@ -30,12 +30,15 @@ pub struct AppState {
 
 /// Builds the router: service routes behind the token check, Swagger UI public.
 fn app(state: AppState) -> Router {
+    let base_path = state.config.base_path.clone();
+    let swagger = docs::swagger_ui(&base_path);
     Router::new()
         .route("/services/status", get(status::services_status))
         .route("/services/{service_name}/run", post(scripts::run_service_script))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_token))
         .with_state(state)
-        .merge(docs::swagger_ui())
+        .merge(swagger)
+        .layer(middleware::from_fn_with_state(base_path, docs::redirect_bare_api))
 }
 
 #[tokio::main]
@@ -111,6 +114,7 @@ mod tests {
             port: 0,
             security_token: TOKEN.into(),
             scripts_dir: dir.path().to_path_buf(),
+            base_path: String::new(),
         };
         (app(AppState { config: Arc::new(config) }), dir)
     }
