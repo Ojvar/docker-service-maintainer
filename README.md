@@ -95,3 +95,7 @@ The JSON spec is at `/api/openapi.json`.
 ```bash
 cargo test
 ```
+
+## Version
+
+The version comes from `version` in `Cargo.toml`. It is printed at startup (`service-maintainer v0.1.0 listening on ...`), shown in Swagger UI, and available with `./service-maintainer --version`.

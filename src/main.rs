@@ -41,8 +41,16 @@ fn app(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(base_path, docs::redirect_bare_api))
 }
 
+/// App version, taken from `version` in `Cargo.toml` at build time.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("service-maintainer {VERSION}");
+        return;
+    }
+
     let config = Config::from_env().unwrap_or_else(|e| {
         eprintln!("config error: {e}");
         std::process::exit(1);
@@ -56,7 +64,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    println!("service-maintainer listening on http://{addr}");
+    println!("service-maintainer v{VERSION} listening on http://{addr}");
     axum::serve(listener, app(state)).await.expect("server error");
 }
 
