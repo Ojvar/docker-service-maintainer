@@ -85,13 +85,23 @@ per-service scripts. Each entry has `name`, `id`, `mode`, `replicas`, `running`,
 `in_docker` and `has_script`. If Docker fails, scripts are still listed and
 `docker_error` is set.
 
+### Reload a Docker service
+
+```
+POST /services/{service-name}/reload
+```
+
+Runs `scripts/reload-docker-service.sh <name>` (`docker service update --force --detach`).
+The name must be a service currently listed by Docker (`404` otherwise, `400` for unsafe names).
+Returns the same JSON as `/run`.
+
 ### Admin dashboard
 
 Open `http://<HOST>:<PORT>/dashboard` (behind a proxy: `<BASE_PATH>/dashboard`).
 The page is public but holds no data: enter the token in the header and it is kept
 in the browser's localStorage. Features: summary cards, search, filters (health,
 mode, source), sorting, pagination, table/card views, detail drawer with a
-"Run maintenance script" button, CSV export, auto-refresh, dark/light theme and RTL toggle.
+"Run maintenance script" button, per-service Reload buttons (Docker services only), CSV export, auto-refresh, dark/light theme and RTL toggle.
 No external assets; the page is embedded from `templates/dashboard.html`.
 
 ### API docs (Swagger)

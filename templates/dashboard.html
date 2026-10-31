@@ -57,6 +57,12 @@ pre{background:var(--panel2);padding:10px;border-radius:8px;overflow:auto;max-he
 .toggle button{border:0;border-radius:0}.toggle button.on{background:var(--accent);color:#fff}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--unk);display:inline-block}
 .dot.live{background:var(--ok);animation:p 1.5s infinite}@keyframes p{50%{opacity:.3}}
+.toasts{position:fixed;bottom:16px;inset-inline-end:16px;display:flex;flex-direction:column;gap:10px;z-index:20;max-width:min(420px,calc(100% - 32px))}
+.toast{background:var(--panel);border:1px solid var(--border);border-inline-start:4px solid var(--ok);border-radius:10px;padding:10px 14px;box-shadow:var(--shadow)}
+.toast.err{border-inline-start-color:var(--bad)}.toast pre{max-height:160px;margin:6px 0 0}
+.toast .x{float:inline-end;background:none;border:0;padding:0 4px}
+button.sm{padding:3px 9px;font-size:12px}button:disabled{opacity:.5;cursor:not-allowed}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:s .8s linear infinite;vertical-align:-1px}@keyframes s{to{transform:rotate(360deg)}}
 @media(max-width:700px){main{padding:12px}header{padding:12px}.hide-sm{display:none}}
 </style>
 </head>
@@ -90,6 +96,7 @@ pre{background:var(--panel2);padding:10px;border-radius:8px;overflow:auto;max-he
 </main>
 <div class="drawer-bg" id="drawerBg"></div>
 <aside class="drawer" id="drawer"></aside>
+<div class="toasts" id="toasts"></div>
 <script>
 "use strict";
 const API = "services";
@@ -98,13 +105,39 @@ const COLUMNS = [["name","Name"],["health","Health"],["replicas","Replicas"],["m
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; } };
-const state = Object.assign({ services: [], sort: "name", asc: true, page: 1, view: "table", theme: "dark", dir: "ltr", timer: null }, loadPrefs());
+const state = Object.assign({ services: [], sort: "name", asc: true, page: 1, view: "table", theme: "dark", dir: "ltr", timer: null, reloading: new Set() }, loadPrefs());
 const savePrefs = () => localStorage.setItem(PREFS_KEY, JSON.stringify({ sort: state.sort, asc: state.asc, view: state.view, theme: state.theme, dir: state.dir }));
 const token = () => localStorage.getItem(TOKEN_KEY) || "";
 
 const showError = (msg) => { $("alert").textContent = msg; $("alert").style.display = msg ? "block" : "none"; };
 const badge = (h) => `<span class="badge ${esc(h)}">${esc(h)}</span>`;
 const bar = (s) => s.desired ? `<span class="bar"><i style="width:${Math.min(100, (s.running / s.desired) * 100)}%"></i></span>` : "";
+
+const reloadBtn = (s, cls = "sm") => s.in_docker
+  ? `<button class="${cls}" data-reload="${esc(s.name)}" title="docker service update --force" ${state.reloading.has(s.name) ? "disabled" : ""}>${state.reloading.has(s.name) ? '<span class="spin"></span> Reloading' : "⟳ Reload"}</button>`
+  : "";
+
+function toast(title, body, ok) {
+  const el = document.createElement("div");
+  el.className = "toast" + (ok ? "" : " err");
+  el.innerHTML = `<button class="x">✕</button><b>${esc(title)}</b>${body ? `<pre class="mono">${esc(body)}</pre>` : ""}`;
+  el.querySelector(".x").onclick = () => el.remove();
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), ok ? 8000 : 20000);
+}
+
+const resultText = (r) => [r.stdout, r.stderr && "--- stderr ---\n" + r.stderr].filter(Boolean).join("\n").trim();
+
+async function reloadService(name) {
+  if (state.reloading.has(name) || !confirm(`Force-reload "${name}"?\nThis runs: docker service update --force ${name}`)) return;
+  state.reloading.add(name); render(); refreshDrawer(name);
+  try {
+    const r = await api(`${API}/${encodeURIComponent(name)}/reload`, { method: "POST" });
+    toast(`${name}: ${r.success ? "reloaded" : "reload failed"} (exit ${r.exit_code ?? "?"})`, resultText(r), r.success);
+  } catch (e) { toast(`${name}: reload failed`, e.message, false); }
+  state.reloading.delete(name);
+  await load(); refreshDrawer(name);
+}
 
 async function api(path, opts = {}) {
   const res = await fetch(path, { ...opts, headers: { "x-security-token": token(), ...(opts.headers || {}) } });
@@ -152,12 +185,12 @@ function renderStats() {
 
 function renderTable(rows) {
   const head = COLUMNS.map(([k, l]) => `<th data-k="${k}" class="${["ports","has_script"].includes(k) ? "hide-sm" : ""}">${l} <span class="arrow">${state.sort === k ? (state.asc ? "▲" : "▼") : ""}</span></th>`).join("");
-  const body = rows.map((s) => `<tr data-name="${esc(s.name)}"><td><b>${esc(s.name)}</b></td><td>${badge(s.health)}</td><td>${esc(s.replicas || "—")}${bar(s)}</td><td>${esc(s.mode || "—")}</td><td class="mono">${esc(s.image || "—")}</td><td class="mono hide-sm">${esc(s.ports || "—")}</td><td class="hide-sm">${s.has_script ? "✓" : ""}</td></tr>`).join("");
-  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  const body = rows.map((s) => `<tr data-name="${esc(s.name)}"><td><b>${esc(s.name)}</b></td><td>${badge(s.health)}</td><td>${esc(s.replicas || "—")}${bar(s)}</td><td>${esc(s.mode || "—")}</td><td class="mono">${esc(s.image || "—")}</td><td class="mono hide-sm">${esc(s.ports || "—")}</td><td class="hide-sm">${s.has_script ? "✓" : ""}</td><td>${reloadBtn(s)}</td></tr>`).join("");
+  return `<table><thead><tr>${head}<th>Actions</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
 function renderCards(rows) {
-  return `<div class="cards">${rows.map((s) => `<div class="card" data-name="${esc(s.name)}"><h3><span>${esc(s.name)}</span>${badge(s.health)}</h3><div class="row"><span class="muted">Replicas</span><span>${esc(s.replicas || "—")}${bar(s)}</span></div><div class="row"><span class="muted">Mode</span><span>${esc(s.mode || "—")}</span></div><div class="row"><span class="muted">Image</span><span class="mono">${esc(s.image || "—")}</span></div><div class="row"><span class="muted">Ports</span><span class="mono">${esc(s.ports || "—")}</span></div></div>`).join("")}</div>`;
+  return `<div class="cards">${rows.map((s) => `<div class="card" data-name="${esc(s.name)}"><h3><span>${esc(s.name)}</span>${badge(s.health)}</h3><div class="row"><span class="muted">Replicas</span><span>${esc(s.replicas || "—")}${bar(s)}</span></div><div class="row"><span class="muted">Mode</span><span>${esc(s.mode || "—")}</span></div><div class="row"><span class="muted">Image</span><span class="mono">${esc(s.image || "—")}</span></div><div class="row"><span class="muted">Ports</span><span class="mono">${esc(s.ports || "—")}</span></div>${s.in_docker ? `<div class="row" style="justify-content:flex-end">${reloadBtn(s)}</div>` : ""}</div>`).join("")}</div>`;
 }
 
 function render() {
@@ -175,11 +208,13 @@ function openDrawer(name) {
   const s = state.services.find((x) => x.name === name);
   if (!s) return;
   const fields = [["Health", badge(s.health)], ["ID", `<span class="mono">${esc(s.id || "—")}</span>`], ["Mode", esc(s.mode || "—")], ["Replicas", esc(s.replicas || "—") + bar(s)], ["Image", `<span class="mono">${esc(s.image || "—")}</span>`], ["Ports", `<span class="mono">${esc(s.ports || "—")}</span>`], ["In Docker", s.in_docker ? "Yes" : "No"], ["Script", s.has_script ? `${esc(s.name)}.sh` : "None"]];
-  $("drawer").innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">${esc(s.name)}</h2><button id="close">✕</button></div><dl>${fields.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>${s.has_script ? '<button class="primary" id="run">▶ Run maintenance script</button>' : ""}<div id="runOut"></div><h4>Raw</h4><pre class="mono">${esc(JSON.stringify(s, null, 2))}</pre>`;
+  $("drawer").innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">${esc(s.name)}</h2><button id="close">✕</button></div><dl>${fields.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl><div style="display:flex;gap:8px;flex-wrap:wrap">${reloadBtn(s, "primary")}${s.has_script ? '<button id="run">▶ Run maintenance script</button>' : ""}</div><div id="runOut"></div><h4>Raw</h4><pre class="mono">${esc(JSON.stringify(s, null, 2))}</pre>`;
+  $("drawer").dataset.name = s.name;
   $("drawer").classList.add("open"); $("drawerBg").style.display = "block";
   $("close").onclick = closeDrawer;
   if (s.has_script) $("run").onclick = () => runScript(s.name);
 }
+const refreshDrawer = (name) => { if ($("drawer").classList.contains("open") && $("drawer").dataset.name === name) openDrawer(name); };
 const closeDrawer = () => { $("drawer").classList.remove("open"); $("drawerBg").style.display = "none"; };
 
 async function runScript(name) {
@@ -223,12 +258,15 @@ function bind() {
   $("vCards").onclick = () => { state.view = "cards"; savePrefs(); render(); };
   $("stats").onclick = (e) => { const s = e.target.closest(".stat"); if (!s) return; const f = s.dataset.f; $("fSource").value = f === "script" ? "script" : ""; $("fHealth").value = f === "script" ? "" : f; state.page = 1; render(); };
   $("list").onclick = (e) => {
-    const th = e.target.closest("th"), p = e.target.closest("[data-p]"), item = e.target.closest("[data-name]");
+    const rb = e.target.closest("[data-reload]");
+    if (rb) { e.stopPropagation(); reloadService(rb.dataset.reload); return; }
+    const th = e.target.closest("th[data-k]"), p = e.target.closest("[data-p]"), item = e.target.closest("[data-name]");
     if (th) { state.asc = state.sort === th.dataset.k ? !state.asc : true; state.sort = th.dataset.k; savePrefs(); render(); }
     else if (p) { state.page += +p.dataset.p; render(); }
     else if (item) openDrawer(item.dataset.name);
   };
   $("drawerBg").onclick = closeDrawer;
+  $("drawer").addEventListener("click", (e) => { const rb = e.target.closest("[data-reload]"); if (rb) reloadService(rb.dataset.reload); });
   document.onkeydown = (e) => { if (e.key === "Escape") closeDrawer(); if (e.key === "/" && document.activeElement.tagName !== "INPUT") { e.preventDefault(); $("q").focus(); } };
 }
 

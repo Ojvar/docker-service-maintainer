@@ -4,6 +4,7 @@
 //! Routes (all require the `x-security-token` header):
 //! - `POST /services/{service_name}/run` runs `scripts/<service_name>.sh`
 //! - `GET  /services` lists services as JSON (used by the dashboard)
+//! - `POST /services/{service_name}/reload` force-updates a Docker service
 //! - `GET  /services/status` returns an HTML report of Docker services
 //!
 //! Public: `GET /api` serves Swagger UI, generated from the code by `utoipa`,
@@ -40,6 +41,7 @@ fn app(state: AppState) -> Router {
         .route("/services", get(services::list_services))
         .route("/services/status", get(status::services_status))
         .route("/services/{service_name}/run", post(scripts::run_service_script))
+        .route("/services/{service_name}/reload", post(services::reload_service))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_token))
         .with_state(state)
         .route("/dashboard", get(dashboard::dashboard))
@@ -249,5 +251,42 @@ mod tests {
         let (status, body) = send(app, "GET", "/services", Some(TOKEN)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(r#""docker_error":"missing script"#));
+    }
+    const LIST_WEB: &str = r#"echo '{"ID":"x1","Name":"web","Mode":"replicated","Replicas":"1/1","Image":"nginx","Ports":""}'"#;
+
+    #[tokio::test]
+    async fn reload_requires_token() {
+        let (app, _dir) = test_app(&[]);
+        let (status, _) = send(app, "POST", "/services/web/reload", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_invalid_name() {
+        let (app, _dir) = test_app(&[]);
+        let (status, _) = send(app, "POST", "/services/..%2Fetc;rm/reload", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn reload_unknown_service_is_404() {
+        let (app, _dir) = test_app(&[(services::LIST_SERVICES_JSON_SCRIPT, LIST_WEB), (services::RELOAD_SCRIPT, "echo \"$1\"")]);
+        let (status, _) = send(app, "POST", "/services/api/reload", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reload_runs_script_with_name() {
+        let (app, _dir) = test_app(&[(services::LIST_SERVICES_JSON_SCRIPT, LIST_WEB), (services::RELOAD_SCRIPT, "echo \"reloaded $1\"")]);
+        let (status, body) = send(app, "POST", "/services/web/reload", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""success":true"#) && body.contains("reloaded web"));
+    }
+
+    #[tokio::test]
+    async fn reload_script_not_listed_as_service() {
+        let (app, _dir) = test_app(&[(services::RELOAD_SCRIPT, "true")]);
+        let (_, body) = send(app, "GET", "/services", Some(TOKEN)).await;
+        assert!(!body.contains("reload-docker-service"));
     }
 }

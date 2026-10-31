@@ -5,17 +5,27 @@
 
 use std::collections::BTreeSet;
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{AppState, scripts::run_script};
+use crate::{
+    AppState,
+    scripts::{RunResult, is_valid_service_name, run_script, run_script_with_args},
+};
 
 /// Script (inside `SCRIPTS_DIR`) that prints one `docker service ls` JSON object per line.
 pub const LIST_SERVICES_JSON_SCRIPT: &str = "list-docker-services-json.sh";
 
 /// Helper scripts that are not per-service maintenance scripts.
-const HELPER_SCRIPTS: [&str; 2] = ["list-docker-services", "list-docker-services-json"];
+const HELPER_SCRIPTS: [&str; 3] = ["list-docker-services", "list-docker-services-json", "reload-docker-service"];
+
+/// Script (inside `SCRIPTS_DIR`) that force-updates one Docker service, given its name as `$1`.
+pub const RELOAD_SCRIPT: &str = "reload-docker-service.sh";
 
 /// Health derived from the replica count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -104,6 +114,65 @@ pub async fn list_services(State(state): State<AppState>) -> Result<Json<Service
         Err(e) => (Vec::new(), Some(e)),
     };
     Ok(Json(ServiceList { services: merge(rows, &scripts), docker_error }))
+}
+
+/// `POST /services/{service_name}/reload`
+///
+/// Force-redeploys a Docker Swarm service (`docker service update --force`)
+/// via `reload-docker-service.sh`. The name must be a currently listed Docker service.
+///
+/// A reload that runs but fails still returns `200`, with `success: false`.
+#[utoipa::path(
+    post,
+    path = "/services/{service_name}/reload",
+    params(("service_name" = String, Path, description = "Docker service name (letters, digits, `-` and `_`)", example = "web")),
+    responses(
+        (status = 200, description = "Reload finished", body = RunResult),
+        (status = 400, description = "Invalid service name"),
+        (status = 401, description = "Missing or wrong x-security-token"),
+        (status = 404, description = "Not a listed Docker service"),
+        (status = 500, description = "Listing failed or reload script missing / could not start"),
+    )
+)]
+pub async fn reload_service(
+    State(state): State<AppState>,
+    Path(service_name): Path<String>,
+) -> Result<Json<RunResult>, (StatusCode, String)> {
+    if !is_valid_service_name(&service_name) {
+        return Err((StatusCode::BAD_REQUEST, "invalid service name".into()));
+    }
+    ensure_docker_service(&state, &service_name).await?;
+    let output = run_reload(&state, &service_name)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(RunResult {
+        service: service_name,
+        success: output.status.success(),
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }))
+}
+
+/// Errors with `404` unless `name` is in the current `docker service ls` output.
+async fn ensure_docker_service(state: &AppState, name: &str) -> Result<(), (StatusCode, String)> {
+    let rows = docker_rows(state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if rows.iter().any(|r| r.name == name) {
+        Ok(())
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("no docker service '{name}'")))
+    }
+}
+
+/// Runs the reload script with the service name as its only argument.
+async fn run_reload(state: &AppState, name: &str) -> Result<std::process::Output, String> {
+    let script = state.config.scripts_dir.join(RELOAD_SCRIPT);
+    if !script.is_file() {
+        return Err(format!("missing script: {}", script.display()));
+    }
+    run_script_with_args(&script, &[name]).await
 }
 
 /// Runs the JSON listing script and parses its output.

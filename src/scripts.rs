@@ -80,8 +80,14 @@ pub async fn run_service_script(
 /// Errors only when the process can't be started; a non-zero exit is returned
 /// as a normal [`Output`].
 pub async fn run_script(script: &FsPath) -> Result<Output, String> {
+    run_script_with_args(script, &[]).await
+}
+
+/// Like [`run_script`], but passes `args` as separate arguments (never through a shell string).
+pub async fn run_script_with_args(script: &FsPath, args: &[&str]) -> Result<Output, String> {
     Command::new("bash")
         .arg(script)
+        .args(args)
         .output()
         .await
         .map_err(|e| format!("failed to run {}: {e}", script.display()))
@@ -89,7 +95,7 @@ pub async fn run_script(script: &FsPath) -> Result<Output, String> {
 
 /// Accepts only letters, digits, `-` and `_` (max 100 chars), so a service
 /// name can never point outside the scripts directory.
-fn is_valid_service_name(name: &str) -> bool {
+pub(crate) fn is_valid_service_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 100
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')

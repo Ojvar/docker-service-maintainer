@@ -23,7 +23,7 @@ use crate::{auth::TOKEN_HEADER, scripts, services, status};
 #[derive(OpenApi)]
 #[openapi(
     info(title = "service-maintainer", description = "Runs per-service bash scripts and reports Docker service status."),
-    paths(scripts::run_service_script, services::list_services, status::services_status),
+    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status),
     components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health)),
     modifiers(&SecurityToken),
     security(("security_token" = []))
