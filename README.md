@@ -73,6 +73,27 @@ curl -H "x-security-token: $TOKEN" http://localhost:8080/services/status > statu
 Returns an HTML page with the output of `scripts/list-docker-services.sh`.
 The page layout lives in `templates/status.html` (rebuild after editing it).
 
+### Services list (JSON)
+
+```
+GET /services
+```
+
+Lists Docker services (from `scripts/list-docker-services-json.sh`) merged with the
+per-service scripts. Each entry has `name`, `id`, `mode`, `replicas`, `running`,
+`desired`, `image`, `ports`, `health` (`healthy`/`degraded`/`down`/`unknown`),
+`in_docker` and `has_script`. If Docker fails, scripts are still listed and
+`docker_error` is set.
+
+### Admin dashboard
+
+Open `http://<HOST>:<PORT>/dashboard` (behind a proxy: `<BASE_PATH>/dashboard`).
+The page is public but holds no data: enter the token in the header and it is kept
+in the browser's localStorage. Features: summary cards, search, filters (health,
+mode, source), sorting, pagination, table/card views, detail drawer with a
+"Run maintenance script" button, CSV export, auto-refresh, dark/light theme and RTL toggle.
+No external assets; the page is embedded from `templates/dashboard.html`.
+
 ### API docs (Swagger)
 
 Open `http://<HOST>:<PORT>/api/` for Swagger UI (no token needed to view it).

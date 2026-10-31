@@ -3,14 +3,18 @@
 //!
 //! Routes (all require the `x-security-token` header):
 //! - `POST /services/{service_name}/run` runs `scripts/<service_name>.sh`
+//! - `GET  /services` lists services as JSON (used by the dashboard)
 //! - `GET  /services/status` returns an HTML report of Docker services
 //!
-//! Public: `GET /api` serves Swagger UI, generated from the code by `utoipa`.
+//! Public: `GET /api` serves Swagger UI, generated from the code by `utoipa`,
+//! and `GET /dashboard` serves the admin dashboard (it asks for the token).
 
 mod auth;
 mod config;
+mod dashboard;
 mod docs;
 mod scripts;
+mod services;
 mod status;
 
 use std::sync::Arc;
@@ -33,10 +37,12 @@ fn app(state: AppState) -> Router {
     let base_path = state.config.base_path.clone();
     let swagger = docs::swagger_ui(&base_path);
     Router::new()
+        .route("/services", get(services::list_services))
         .route("/services/status", get(status::services_status))
         .route("/services/{service_name}/run", post(scripts::run_service_script))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_token))
         .with_state(state)
+        .route("/dashboard", get(dashboard::dashboard))
         .merge(swagger)
         .layer(middleware::from_fn_with_state(base_path, docs::redirect_bare_api))
 }
@@ -208,5 +214,40 @@ mod tests {
         let (app, _dir) = test_app(&[]);
         let (status, _) = send(app, "GET", "/services/status", Some(TOKEN)).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    #[tokio::test]
+    async fn dashboard_is_public_html() {
+        let (app, _dir) = test_app(&[]);
+        let (status, body) = send(app, "GET", "/dashboard", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<title>Service Maintainer"));
+    }
+
+    #[tokio::test]
+    async fn services_requires_token() {
+        let (app, _dir) = test_app(&[]);
+        let (status, _) = send(app, "GET", "/services", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn services_lists_docker_and_scripts() {
+        let (app, _dir) = test_app(&[
+            (services::LIST_SERVICES_JSON_SCRIPT, r#"echo '{"ID":"x1","Name":"web","Mode":"replicated","Replicas":"1/2","Image":"nginx","Ports":""}'"#),
+            ("backup.sh", "true"),
+        ]);
+        let (status, body) = send(app, "GET", "/services", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""name":"web""#) && body.contains(r#""health":"degraded""#));
+        assert!(body.contains(r#""name":"backup""#));
+        assert!(body.contains(r#""docker_error":null"#));
+    }
+
+    #[tokio::test]
+    async fn services_reports_docker_error() {
+        let (app, _dir) = test_app(&[("backup.sh", "true")]);
+        let (status, body) = send(app, "GET", "/services", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""docker_error":"missing script"#));
     }
 }

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Service Maintainer · Dashboard</title>
+<style>
+:root{--bg:#0f1220;--panel:#171b2e;--panel2:#1f2440;--text:#e6e8f2;--muted:#8d93b0;--border:#2a3052;--accent:#7c5cff;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--unk:#64748b;--shadow:0 6px 24px rgba(0,0,0,.35)}
+[data-theme=light]{--bg:#f4f6fb;--panel:#fff;--panel2:#eef1f8;--text:#1b1f33;--muted:#5f6684;--border:#dde2ef;--shadow:0 6px 24px rgba(30,40,80,.08)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Vazirmatn,"Segoe UI",Tahoma,system-ui,sans-serif;font-size:14px}
+header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:16px 24px;background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0;display:flex;gap:8px;align-items:center}
+.logo{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#22d3ee)}
+.spacer{flex:1}
+main{padding:20px 24px;max-width:1400px;margin:auto}
+input,select,button{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:7px 10px}
+button{cursor:pointer}button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:18px}
+.stat{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow);cursor:pointer;transition:transform .15s}
+.stat:hover{transform:translateY(-2px)}
+.stat .n{font-size:28px;font-weight:700}.stat .l{color:var(--muted)}
+.stat.ok .n{color:var(--ok)}.stat.warn .n{color:var(--warn)}.stat.bad .n{color:var(--bad)}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+.toolbar input[type=search]{flex:1;min-width:200px}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);overflow:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 12px;text-align:start;border-bottom:1px solid var(--border);white-space:nowrap}
+th{color:var(--muted);font-weight:600;cursor:pointer;user-select:none;position:sticky;top:0;background:var(--panel)}
+th .arrow{opacity:.6}
+tbody tr{cursor:pointer}tbody tr:hover{background:var(--panel2)}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600}
+.badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.healthy{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
+.degraded{color:var(--warn);background:color-mix(in srgb,var(--warn) 15%,transparent)}
+.down{color:var(--bad);background:color-mix(in srgb,var(--bad) 15%,transparent)}
+.unknown{color:var(--unk);background:color-mix(in srgb,var(--unk) 18%,transparent)}
+.bar{height:6px;width:80px;background:var(--panel2);border-radius:4px;overflow:hidden;display:inline-block;vertical-align:middle;margin-inline-start:6px}
+.bar>i{display:block;height:100%;background:var(--ok)}
+.muted{color:var(--muted)}.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:14px}
+.card{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px;cursor:pointer}
+.card:hover{border-color:var(--accent)}
+.card h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;gap:8px}
+.card .row{display:flex;justify-content:space-between;gap:8px;margin:4px 0}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:12px}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+.alert{background:color-mix(in srgb,var(--bad) 15%,transparent);color:var(--bad);border:1px solid var(--bad);padding:10px 14px;border-radius:10px;margin-bottom:14px;display:none}
+.drawer-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;z-index:10}
+.drawer{position:fixed;top:0;inset-inline-end:0;height:100%;width:min(480px,100%);background:var(--panel);border-inline-start:1px solid var(--border);box-shadow:var(--shadow);padding:20px;overflow:auto;transform:translateX(110%);transition:transform .2s;z-index:11}
+[dir=rtl] .drawer{transform:translateX(-110%)}
+.drawer.open{transform:none}
+.drawer dl{display:grid;grid-template-columns:120px 1fr;gap:8px 12px}.drawer dt{color:var(--muted)}.drawer dd{margin:0;word-break:break-all}
+pre{background:var(--panel2);padding:10px;border-radius:8px;overflow:auto;max-height:300px;white-space:pre-wrap}
+.toggle{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.toggle button{border:0;border-radius:0}.toggle button.on{background:var(--accent);color:#fff}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--unk);display:inline-block}
+.dot.live{background:var(--ok);animation:p 1.5s infinite}@keyframes p{50%{opacity:.3}}
+@media(max-width:700px){main{padding:12px}header{padding:12px}.hide-sm{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="logo"></span>Service Maintainer</h1>
+  <span class="muted" id="updated"></span>
+  <span class="spacer"></span>
+  <input type="password" id="token" placeholder="x-security-token" autocomplete="off" style="width:180px">
+  <button id="saveToken" class="primary">Connect</button>
+  <label class="muted"><span class="dot" id="liveDot"></span> <input type="checkbox" id="auto"> Auto</label>
+  <select id="interval" title="Refresh interval"><option value="10">10s</option><option value="30" selected>30s</option><option value="60">60s</option></select>
+  <button id="refresh" title="Refresh">⟳</button>
+  <button id="dir" title="Toggle RTL/LTR">⇄</button>
+  <button id="theme" title="Toggle theme">◐</button>
+</header>
+<main>
+  <div class="alert" id="alert"></div>
+  <section class="stats" id="stats"></section>
+  <section class="toolbar">
+    <input type="search" id="q" placeholder="Search name, image, ports, id…">
+    <select id="fHealth"><option value="">All health</option><option>healthy</option><option>degraded</option><option>down</option><option>unknown</option></select>
+    <select id="fMode"><option value="">All modes</option></select>
+    <select id="fSource"><option value="">All sources</option><option value="docker">In Docker</option><option value="script">Has script</option><option value="scriptonly">Script only</option></select>
+    <select id="pageSize"><option>10</option><option selected>25</option><option>50</option><option>100</option></select>
+    <button id="reset">Reset</button>
+    <button id="export">Export CSV</button>
+    <span class="toggle"><button id="vTable" class="on">Table</button><button id="vCards">Cards</button></span>
+  </section>
+  <section class="panel" id="list"></section>
+</main>
+<div class="drawer-bg" id="drawerBg"></div>
+<aside class="drawer" id="drawer"></aside>
+<script>
+"use strict";
+const API = "services";
+const TOKEN_KEY = "sm.token", PREFS_KEY = "sm.prefs";
+const COLUMNS = [["name","Name"],["health","Health"],["replicas","Replicas"],["mode","Mode"],["image","Image"],["ports","Ports"],["has_script","Script"]];
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; } };
+const state = Object.assign({ services: [], sort: "name", asc: true, page: 1, view: "table", theme: "dark", dir: "ltr", timer: null }, loadPrefs());
+const savePrefs = () => localStorage.setItem(PREFS_KEY, JSON.stringify({ sort: state.sort, asc: state.asc, view: state.view, theme: state.theme, dir: state.dir }));
+const token = () => localStorage.getItem(TOKEN_KEY) || "";
+
+const showError = (msg) => { $("alert").textContent = msg; $("alert").style.display = msg ? "block" : "none"; };
+const badge = (h) => `<span class="badge ${esc(h)}">${esc(h)}</span>`;
+const bar = (s) => s.desired ? `<span class="bar"><i style="width:${Math.min(100, (s.running / s.desired) * 100)}%"></i></span>` : "";
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { "x-security-token": token(), ...(opts.headers || {}) } });
+  if (res.status === 401) throw new Error("Unauthorized: enter a valid security token.");
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+async function load() {
+  if (!token()) { showError("Enter your security token and click Connect."); render(); return; }
+  try {
+    const data = await api(API);
+    state.services = data.services || [];
+    showError(data.docker_error ? `Docker listing failed: ${data.docker_error}` : "");
+    $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+    fillModes();
+  } catch (e) { showError(e.message); }
+  render();
+}
+
+function fillModes() {
+  const sel = $("fMode"), cur = sel.value;
+  const modes = [...new Set(state.services.map((s) => s.mode).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">All modes</option>' + modes.map((m) => `<option>${esc(m)}</option>`).join("");
+  sel.value = modes.includes(cur) ? cur : "";
+}
+
+const matchesSource = (s, src) => !src || (src === "docker" && s.in_docker) || (src === "script" && s.has_script) || (src === "scriptonly" && !s.in_docker);
+const matchesQuery = (s, q) => !q || [s.name, s.image, s.ports, s.id, s.mode].join(" ").toLowerCase().includes(q);
+function filtered() {
+  const q = $("q").value.trim().toLowerCase(), h = $("fHealth").value, m = $("fMode").value, src = $("fSource").value;
+  return state.services.filter((s) => matchesQuery(s, q) && (!h || s.health === h) && (!m || s.mode === m) && matchesSource(s, src));
+}
+const sortKey = (s, k) => k === "replicas" ? (s.desired ? s.running / s.desired : -1) : String(s[k] ?? "").toLowerCase();
+function sorted(list) {
+  const k = state.sort, dir = state.asc ? 1 : -1;
+  return [...list].sort((a, b) => { const x = sortKey(a, k), y = sortKey(b, k); return x < y ? -dir : x > y ? dir : 0; });
+}
+
+function renderStats() {
+  const count = (h) => state.services.filter((s) => s.health === h).length;
+  const items = [["", "Total", state.services.length, ""], ["healthy", "Healthy", count("healthy"), "ok"], ["degraded", "Degraded", count("degraded"), "warn"], ["down", "Down", count("down"), "bad"], ["unknown", "Unknown", count("unknown"), ""], ["script", "With script", state.services.filter((s) => s.has_script).length, ""]];
+  $("stats").innerHTML = items.map(([f, l, n, c]) => `<div class="stat ${c}" data-f="${f}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+}
+
+function renderTable(rows) {
+  const head = COLUMNS.map(([k, l]) => `<th data-k="${k}" class="${["ports","has_script"].includes(k) ? "hide-sm" : ""}">${l} <span class="arrow">${state.sort === k ? (state.asc ? "▲" : "▼") : ""}</span></th>`).join("");
+  const body = rows.map((s) => `<tr data-name="${esc(s.name)}"><td><b>${esc(s.name)}</b></td><td>${badge(s.health)}</td><td>${esc(s.replicas || "—")}${bar(s)}</td><td>${esc(s.mode || "—")}</td><td class="mono">${esc(s.image || "—")}</td><td class="mono hide-sm">${esc(s.ports || "—")}</td><td class="hide-sm">${s.has_script ? "✓" : ""}</td></tr>`).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderCards(rows) {
+  return `<div class="cards">${rows.map((s) => `<div class="card" data-name="${esc(s.name)}"><h3><span>${esc(s.name)}</span>${badge(s.health)}</h3><div class="row"><span class="muted">Replicas</span><span>${esc(s.replicas || "—")}${bar(s)}</span></div><div class="row"><span class="muted">Mode</span><span>${esc(s.mode || "—")}</span></div><div class="row"><span class="muted">Image</span><span class="mono">${esc(s.image || "—")}</span></div><div class="row"><span class="muted">Ports</span><span class="mono">${esc(s.ports || "—")}</span></div></div>`).join("")}</div>`;
+}
+
+function render() {
+  renderStats();
+  const all = sorted(filtered()), size = +$("pageSize").value, pages = Math.max(1, Math.ceil(all.length / size));
+  state.page = Math.min(state.page, pages);
+  const rows = all.slice((state.page - 1) * size, state.page * size);
+  const content = rows.length ? (state.view === "table" ? renderTable(rows) : renderCards(rows)) : '<div class="empty">No services match.</div>';
+  $("list").innerHTML = content + `<div class="pager"><span class="muted">${all.length} result(s)</span><button data-p="-1" ${state.page <= 1 ? "disabled" : ""}>‹ Prev</button><span>Page ${state.page} / ${pages}</span><button data-p="1" ${state.page >= pages ? "disabled" : ""}>Next ›</button></div>`;
+  $("vTable").classList.toggle("on", state.view === "table");
+  $("vCards").classList.toggle("on", state.view === "cards");
+}
+
+function openDrawer(name) {
+  const s = state.services.find((x) => x.name === name);
+  if (!s) return;
+  const fields = [["Health", badge(s.health)], ["ID", `<span class="mono">${esc(s.id || "—")}</span>`], ["Mode", esc(s.mode || "—")], ["Replicas", esc(s.replicas || "—") + bar(s)], ["Image", `<span class="mono">${esc(s.image || "—")}</span>`], ["Ports", `<span class="mono">${esc(s.ports || "—")}</span>`], ["In Docker", s.in_docker ? "Yes" : "No"], ["Script", s.has_script ? `${esc(s.name)}.sh` : "None"]];
+  $("drawer").innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">${esc(s.name)}</h2><button id="close">✕</button></div><dl>${fields.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>${s.has_script ? '<button class="primary" id="run">▶ Run maintenance script</button>' : ""}<div id="runOut"></div><h4>Raw</h4><pre class="mono">${esc(JSON.stringify(s, null, 2))}</pre>`;
+  $("drawer").classList.add("open"); $("drawerBg").style.display = "block";
+  $("close").onclick = closeDrawer;
+  if (s.has_script) $("run").onclick = () => runScript(s.name);
+}
+const closeDrawer = () => { $("drawer").classList.remove("open"); $("drawerBg").style.display = "none"; };
+
+async function runScript(name) {
+  if (!confirm(`Run ${name}.sh now?`)) return;
+  const out = $("runOut");
+  out.innerHTML = '<p class="muted">Running…</p>';
+  try {
+    const r = await api(`${API}/${encodeURIComponent(name)}/run`, { method: "POST" });
+    out.innerHTML = `<p>${badge(r.success ? "healthy" : "down")} exit code ${esc(r.exit_code)}</p><pre class="mono">${esc(r.stdout)}${r.stderr ? "\n--- stderr ---\n" + esc(r.stderr) : ""}</pre>`;
+  } catch (e) { out.innerHTML = `<p class="badge down">${esc(e.message)}</p>`; }
+}
+
+function exportCsv() {
+  const keys = ["name","health","replicas","mode","image","ports","id","in_docker","has_script"];
+  const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const csv = [keys.join(","), ...sorted(filtered()).map((s) => keys.map((k) => cell(s[k])).join(","))].join("\n");
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: "services.csv" });
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+function setAuto() {
+  clearInterval(state.timer);
+  const on = $("auto").checked;
+  $("liveDot").classList.toggle("live", on);
+  state.timer = on ? setInterval(load, +$("interval").value * 1000) : null;
+}
+const applyLook = () => { document.documentElement.dataset.theme = state.theme; document.documentElement.dir = state.dir; };
+
+function bind() {
+  $("token").value = token();
+  $("saveToken").onclick = () => { localStorage.setItem(TOKEN_KEY, $("token").value.trim()); load(); };
+  $("token").onkeydown = (e) => { if (e.key === "Enter") $("saveToken").click(); };
+  $("refresh").onclick = load;
+  $("auto").onchange = setAuto; $("interval").onchange = setAuto;
+  $("theme").onclick = () => { state.theme = state.theme === "dark" ? "light" : "dark"; applyLook(); savePrefs(); };
+  $("dir").onclick = () => { state.dir = state.dir === "rtl" ? "ltr" : "rtl"; applyLook(); savePrefs(); };
+  ["q","fHealth","fMode","fSource","pageSize"].forEach((id) => $(id).addEventListener("input", () => { state.page = 1; render(); }));
+  $("reset").onclick = () => { $("q").value = ""; ["fHealth","fMode","fSource"].forEach((id) => $(id).value = ""); state.page = 1; render(); };
+  $("export").onclick = exportCsv;
+  $("vTable").onclick = () => { state.view = "table"; savePrefs(); render(); };
+  $("vCards").onclick = () => { state.view = "cards"; savePrefs(); render(); };
+  $("stats").onclick = (e) => { const s = e.target.closest(".stat"); if (!s) return; const f = s.dataset.f; $("fSource").value = f === "script" ? "script" : ""; $("fHealth").value = f === "script" ? "" : f; state.page = 1; render(); };
+  $("list").onclick = (e) => {
+    const th = e.target.closest("th"), p = e.target.closest("[data-p]"), item = e.target.closest("[data-name]");
+    if (th) { state.asc = state.sort === th.dataset.k ? !state.asc : true; state.sort = th.dataset.k; savePrefs(); render(); }
+    else if (p) { state.page += +p.dataset.p; render(); }
+    else if (item) openDrawer(item.dataset.name);
+  };
+  $("drawerBg").onclick = closeDrawer;
+  document.onkeydown = (e) => { if (e.key === "Escape") closeDrawer(); if (e.key === "/" && document.activeElement.tagName !== "INPUT") { e.preventDefault(); $("q").focus(); } };
+}
+
+applyLook(); bind(); load();
+</script>
+</body>
+</html>
