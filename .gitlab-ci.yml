@@ -1,0 +1,44 @@
+stages:
+  - deploy
+
+# On every push to dev: fresh clone, submodules, yarn install, .env from the
+# ENV_FILE CI/CD file variable, then docker-build.sh (build, push to Nexus,
+# reload the service). Runs on the docker runner (tag qeng-docker).
+build-and-deploy:
+  stage: deploy
+  tags:
+    - qeng-docker
+  # alpine + git, bash, curl, docker-cli, nodejs, yarn
+  image:
+    name: docker.qeng.ir/gitlab/gitlab-shell-runner:alpine
+    entrypoint: [""]
+  variables:
+    GIT_STRATEGY: clone
+    GIT_SUBMODULE_STRATEGY: none
+    DOCKER_PUSH: "1"
+  before_script:
+    # submodules: fetch git@ and https gitlab URLs with the job token
+    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.qeng.ir/".insteadOf "git@gitlab.qeng.ir:"
+    - git config --global --add url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.qeng.ir/".insteadOf "https://gitlab.qeng.ir/"
+    # docker.qeng.ir (Nexus) login for docker push
+    - export DOCKER_CONFIG="$(mktemp -d)" && cp "$NEXUS_DOCKER_CONFIG" "$DOCKER_CONFIG/config.json"
+  script:
+    - git submodule init
+    - git submodule update
+    - |
+      if [ -f yarn.lock ]; then
+        yarn install --frozen-lockfile --ignore-engines --network-timeout 120000
+      elif [ -f package.json ]; then
+        yarn install --ignore-engines --network-timeout 120000
+      fi
+    - |
+      if [ -f ./docker-build.sh ]; then
+        chmod +x ./docker-build.sh
+      else
+        echo "docker-build.sh does not exist, skipping chmod."
+      fi
+    - yarn docker:build
+  after_script:
+    - rm -f .env
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
