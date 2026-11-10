@@ -1,44 +1,75 @@
 stages:
-  - deploy
+  - test
+  - build
 
-# On every push to dev: fresh clone, submodules, yarn install, .env from the
-# ENV_FILE CI/CD file variable, then docker-build.sh (build, push to Nexus,
-# reload the service). Runs on the docker runner (tag qeng-docker).
-build-and-deploy:
-  stage: deploy
+# Rust service (cargo). Tests run on every push and merge request;
+# a release binary is built on main and kept as a job artifact.
+default:
   tags:
     - qeng-docker
-  # alpine + git, bash, curl, docker-cli, nodejs, yarn
   image:
-    name: docker.qeng.ir/gitlab/gitlab-shell-runner:alpine
+    name: docker.qeng.ir/rust:1-bookworm
     entrypoint: [""]
-  variables:
-    GIT_STRATEGY: clone
-    GIT_SUBMODULE_STRATEGY: none
-    DOCKER_PUSH: "1"
+  interruptible: true
+
+variables:
+  GIT_STRATEGY: clone
+  GIT_SUBMODULE_STRATEGY: none
+  GIT_TERMINAL_PROMPT: "0"
+  # Keep cargo's registry/git cache inside the project so it can be cached.
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: always
+
+.cargo-cache: &cargo-cache
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/registry/index
+      - .cargo/registry/cache
+      - .cargo/git/db
+      - target/
+
+.rust-checks: &rust-checks
   before_script:
-    # submodules: fetch git@ and https gitlab URLs with the job token
-    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.qeng.ir/".insteadOf "git@gitlab.qeng.ir:"
-    - git config --global --add url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.qeng.ir/".insteadOf "https://gitlab.qeng.ir/"
-    # docker.qeng.ir (Nexus) login for docker push
-    - export DOCKER_CONFIG="$(mktemp -d)" && cp "$NEXUS_DOCKER_CONFIG" "$DOCKER_CONFIG/config.json"
+    - set -Eeuo pipefail
+    - |
+      for FILE in Cargo.toml Cargo.lock; do
+        if [ ! -f "$FILE" ]; then
+          echo "ERROR: $FILE does not exist."
+          exit 1
+        fi
+      done
+    - rustc --version && cargo --version
+
+test:
+  stage: test
+  <<: [*cargo-cache, *rust-checks]
+  timeout: 30m
   script:
-    - git submodule init
-    - git submodule update
-    - |
-      if [ -f yarn.lock ]; then
-        yarn install --frozen-lockfile --ignore-engines --network-timeout 120000
-      elif [ -f package.json ]; then
-        yarn install --ignore-engines --network-timeout 120000
-      fi
-    - |
-      if [ -f ./docker-build.sh ]; then
-        chmod +x ./docker-build.sh
-      else
-        echo "docker-build.sh does not exist, skipping chmod."
-      fi
-    - yarn docker:build
-  after_script:
-    - rm -f .env
+    - cargo test --locked --all-targets
   rules:
-    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+build-release:
+  stage: build
+  <<: [*cargo-cache, *rust-checks]
+  timeout: 30m
+  script:
+    - cargo build --release --locked
+    - |
+      mkdir -p dist
+      cp target/release/service-maintainer dist/
+      cp -r scripts templates .env.example README.md dist/
+      ./dist/service-maintainer --version || true
+  artifacts:
+    name: "service-maintainer-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - when: never
