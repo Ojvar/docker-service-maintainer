@@ -5,16 +5,16 @@
 //! Behind a reverse proxy that strips a prefix, set `BASE_PATH` so the browser
 //! loads the spec and calls the API through that prefix.
 
-use utoipa::{
-    Modify, OpenApi,
-    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
-};
 use axum::{
     extract::{Request, State},
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
 use utoipa::openapi::Server;
+use utoipa::{
+    Modify, OpenApi,
+    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
+};
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::{auth::TOKEN_HEADER, scripts, services, status};
@@ -35,10 +35,13 @@ struct SecurityToken;
 
 impl Modify for SecurityToken {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        openapi.components.get_or_insert_with(Default::default).add_security_scheme(
-            "security_token",
-            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(TOKEN_HEADER))),
-        );
+        openapi
+            .components
+            .get_or_insert_with(Default::default)
+            .add_security_scheme(
+                "security_token",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(TOKEN_HEADER))),
+            );
     }
 }
 

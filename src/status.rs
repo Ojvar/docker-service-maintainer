@@ -24,7 +24,9 @@ const REPORT_TEMPLATE: &str = include_str!("../templates/status.html");
         (status = 500, description = "Status script missing or failed"),
     )
 )]
-pub async fn services_status(State(state): State<AppState>) -> Result<Html<String>, (StatusCode, String)> {
+pub async fn services_status(
+    State(state): State<AppState>,
+) -> Result<Html<String>, (StatusCode, String)> {
     let output = list_docker_services(&state)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;

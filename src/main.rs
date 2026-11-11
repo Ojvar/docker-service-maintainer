@@ -40,13 +40,25 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/services", get(services::list_services))
         .route("/services/status", get(status::services_status))
-        .route("/services/{service_name}/run", post(scripts::run_service_script))
-        .route("/services/{service_name}/reload", post(services::reload_service))
-        .layer(middleware::from_fn_with_state(state.clone(), auth::require_token))
+        .route(
+            "/services/{service_name}/run",
+            post(scripts::run_service_script),
+        )
+        .route(
+            "/services/{service_name}/reload",
+            post(services::reload_service),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ))
         .with_state(state)
         .route("/dashboard", get(dashboard::dashboard))
         .merge(swagger)
-        .layer(middleware::from_fn_with_state(base_path, docs::redirect_bare_api))
+        .layer(middleware::from_fn_with_state(
+            base_path,
+            docs::redirect_bare_api,
+        ))
 }
 
 /// App version, taken from `version` in `Cargo.toml` at build time.
@@ -65,15 +77,21 @@ async fn main() {
     });
 
     let addr = format!("{}:{}", config.host, config.port);
-    let state = AppState { config: Arc::new(config) };
+    let state = AppState {
+        config: Arc::new(config),
+    };
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
-        eprintln!("cannot bind {addr}: {e}");
-        std::process::exit(1);
-    });
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("cannot bind {addr}: {e}");
+            std::process::exit(1);
+        });
 
     println!("service-maintainer v{VERSION} listening on http://{addr}");
-    axum::serve(listener, app(state)).await.expect("server error");
+    axum::serve(listener, app(state))
+        .await
+        .expect("server error");
 }
 
 /// Minimal self-deleting temp directory, so tests need no extra crate.
@@ -132,10 +150,20 @@ mod tests {
             scripts_dir: dir.path().to_path_buf(),
             base_path: String::new(),
         };
-        (app(AppState { config: Arc::new(config) }), dir)
+        (
+            app(AppState {
+                config: Arc::new(config),
+            }),
+            dir,
+        )
     }
 
-    async fn send(app: Router, method: &str, uri: &str, token: Option<&str>) -> (StatusCode, String) {
+    async fn send(
+        app: Router,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, String) {
         let mut req = Request::builder().method(method).uri(uri);
         if let Some(t) = token {
             req = req.header(auth::TOKEN_HEADER, t);
@@ -235,7 +263,10 @@ mod tests {
     #[tokio::test]
     async fn services_lists_docker_and_scripts() {
         let (app, _dir) = test_app(&[
-            (services::LIST_SERVICES_JSON_SCRIPT, r#"echo '{"ID":"x1","Name":"web","Mode":"replicated","Replicas":"1/2","Image":"nginx","Ports":""}'"#),
+            (
+                services::LIST_SERVICES_JSON_SCRIPT,
+                r#"echo '{"ID":"x1","Name":"web","Mode":"replicated","Replicas":"1/2","Image":"nginx","Ports":""}'"#,
+            ),
             ("backup.sh", "true"),
         ]);
         let (status, body) = send(app, "GET", "/services", Some(TOKEN)).await;
@@ -270,14 +301,20 @@ mod tests {
 
     #[tokio::test]
     async fn reload_unknown_service_is_404() {
-        let (app, _dir) = test_app(&[(services::LIST_SERVICES_JSON_SCRIPT, LIST_WEB), (services::RELOAD_SCRIPT, "echo \"$1\"")]);
+        let (app, _dir) = test_app(&[
+            (services::LIST_SERVICES_JSON_SCRIPT, LIST_WEB),
+            (services::RELOAD_SCRIPT, "echo \"$1\""),
+        ]);
         let (status, _) = send(app, "POST", "/services/api/reload", Some(TOKEN)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn reload_runs_script_with_name() {
-        let (app, _dir) = test_app(&[(services::LIST_SERVICES_JSON_SCRIPT, LIST_WEB), (services::RELOAD_SCRIPT, "echo \"reloaded $1\"")]);
+        let (app, _dir) = test_app(&[
+            (services::LIST_SERVICES_JSON_SCRIPT, LIST_WEB),
+            (services::RELOAD_SCRIPT, "echo \"reloaded $1\""),
+        ]);
         let (status, body) = send(app, "POST", "/services/web/reload", Some(TOKEN)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(r#""success":true"#) && body.contains("reloaded web"));

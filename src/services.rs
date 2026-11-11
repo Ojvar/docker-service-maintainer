@@ -22,7 +22,11 @@ use crate::{
 pub const LIST_SERVICES_JSON_SCRIPT: &str = "list-docker-services-json.sh";
 
 /// Helper scripts that are not per-service maintenance scripts.
-const HELPER_SCRIPTS: [&str; 3] = ["list-docker-services", "list-docker-services-json", "reload-docker-service"];
+const HELPER_SCRIPTS: [&str; 3] = [
+    "list-docker-services",
+    "list-docker-services-json",
+    "reload-docker-service",
+];
 
 /// Script (inside `SCRIPTS_DIR`) that force-updates one Docker service, given its name as `$1`.
 pub const RELOAD_SCRIPT: &str = "reload-docker-service.sh";
@@ -107,13 +111,18 @@ struct DockerServiceRow {
         (status = 401, description = "Missing or wrong x-security-token"),
     )
 )]
-pub async fn list_services(State(state): State<AppState>) -> Result<Json<ServiceList>, (StatusCode, String)> {
+pub async fn list_services(
+    State(state): State<AppState>,
+) -> Result<Json<ServiceList>, (StatusCode, String)> {
     let scripts = script_names(&state);
     let (rows, docker_error) = match docker_rows(&state).await {
         Ok(rows) => (rows, None),
         Err(e) => (Vec::new(), Some(e)),
     };
-    Ok(Json(ServiceList { services: merge(rows, &scripts), docker_error }))
+    Ok(Json(ServiceList {
+        services: merge(rows, &scripts),
+        docker_error,
+    }))
 }
 
 /// `POST /services/{service_name}/reload`
@@ -202,7 +211,12 @@ fn script_names(state: &AppState) -> BTreeSet<String> {
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
-                .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".sh")).map(str::to_string))
+                .filter_map(|e| {
+                    e.file_name()
+                        .to_str()
+                        .and_then(|n| n.strip_suffix(".sh"))
+                        .map(str::to_string)
+                })
                 .filter(|n| !HELPER_SCRIPTS.contains(&n.as_str()))
                 .collect()
         })
@@ -215,7 +229,12 @@ fn merge(rows: Vec<DockerServiceRow>, scripts: &BTreeSet<String>) -> Vec<Service
     let mut services: Vec<ServiceInfo> = rows
         .into_iter()
         .map(|row| from_docker(row, scripts))
-        .chain(scripts.iter().filter(|n| !docker_names.contains(*n)).map(|n| script_only(n)))
+        .chain(
+            scripts
+                .iter()
+                .filter(|n| !docker_names.contains(*n))
+                .map(|n| script_only(n)),
+        )
         .collect();
     services.sort_by(|a, b| a.name.cmp(&b.name));
     services

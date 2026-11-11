@@ -8,8 +8,8 @@ use axum::{
     http::StatusCode,
 };
 use serde::Serialize;
-use utoipa::ToSchema;
 use tokio::process::Command;
+use utoipa::ToSchema;
 
 use crate::AppState;
 
@@ -59,7 +59,10 @@ pub async fn run_service_script(
 
     let script = state.config.scripts_dir.join(format!("{service_name}.sh"));
     if !script.is_file() {
-        return Err((StatusCode::NOT_FOUND, format!("no script for '{service_name}'")));
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no script for '{service_name}'"),
+        ));
     }
 
     let output = run_script(&script)
@@ -98,7 +101,9 @@ pub async fn run_script_with_args(script: &FsPath, args: &[&str]) -> Result<Outp
 pub(crate) fn is_valid_service_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 100
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[cfg(test)]
@@ -115,7 +120,16 @@ mod tests {
     #[test]
     fn rejects_unsafe_service_names() {
         let too_long = "a".repeat(101);
-        for name in ["", "../etc/passwd", "a/b", "a.sh", "a b", "a;rm", "سرویس", too_long.as_str()] {
+        for name in [
+            "",
+            "../etc/passwd",
+            "a/b",
+            "a.sh",
+            "a b",
+            "a;rm",
+            "سرویس",
+            too_long.as_str(),
+        ] {
             assert!(!is_valid_service_name(name), "{name:?} should be rejected");
         }
     }
