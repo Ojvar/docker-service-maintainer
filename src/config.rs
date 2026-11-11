@@ -30,7 +30,8 @@ impl Config {
     /// Builds the config from any key lookup. Kept separate from [`Config::from_env`]
     /// so it can be tested without touching the real process environment.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let required = |key: &str| get(key).ok_or_else(|| format!("missing required env var: {key}"));
+        let required =
+            |key: &str| get(key).ok_or_else(|| format!("missing required env var: {key}"));
 
         let security_token = required("SECURITY_TOKEN")?;
         if security_token.trim().is_empty() {
@@ -43,7 +44,9 @@ impl Config {
                 .parse()
                 .map_err(|_| "PORT must be a valid number".to_string())?,
             security_token,
-            scripts_dir: get("SCRIPTS_DIR").unwrap_or_else(|| "scripts".into()).into(),
+            scripts_dir: get("SCRIPTS_DIR")
+                .unwrap_or_else(|| "scripts".into())
+                .into(),
             base_path: normalize_base_path(&get("BASE_PATH").unwrap_or_default()),
         })
     }
@@ -52,7 +55,11 @@ impl Config {
 /// Turns `maintain`, `/maintain/` or `/maintain` into `/maintain`; blank or `/` into ``.
 fn normalize_base_path(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('/');
-    if trimmed.is_empty() { String::new() } else { format!("/{trimmed}") }
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("/{trimmed}")
+    }
 }
 
 #[cfg(test)]
@@ -61,8 +68,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn load(vars: &[(&str, &str)]) -> Result<Config, String> {
-        let map: HashMap<String, String> =
-            vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         Config::from_lookup(|key| map.get(key).cloned())
     }
 
@@ -93,7 +102,8 @@ mod tests {
     #[test]
     fn normalizes_base_path() {
         for raw in ["/maintain", "maintain", "/maintain/", " /maintain "] {
-            let config = load(&[("PORT", "1"), ("SECURITY_TOKEN", "s"), ("BASE_PATH", raw)]).unwrap();
+            let config =
+                load(&[("PORT", "1"), ("SECURITY_TOKEN", "s"), ("BASE_PATH", raw)]).unwrap();
             assert_eq!(config.base_path, "/maintain");
         }
         assert_eq!(normalize_base_path("/"), "");
@@ -101,7 +111,11 @@ mod tests {
 
     #[test]
     fn rejects_missing_token() {
-        assert!(load(&[("PORT", "8080")]).unwrap_err().contains("SECURITY_TOKEN"));
+        assert!(
+            load(&[("PORT", "8080")])
+                .unwrap_err()
+                .contains("SECURITY_TOKEN")
+        );
     }
 
     #[test]
@@ -111,7 +125,11 @@ mod tests {
 
     #[test]
     fn rejects_missing_or_invalid_port() {
-        assert!(load(&[("SECURITY_TOKEN", "s")]).unwrap_err().contains("PORT"));
+        assert!(
+            load(&[("SECURITY_TOKEN", "s")])
+                .unwrap_err()
+                .contains("PORT")
+        );
         assert!(load(&[("PORT", "abc"), ("SECURITY_TOKEN", "s")]).is_err());
         assert!(load(&[("PORT", "70000"), ("SECURITY_TOKEN", "s")]).is_err());
     }

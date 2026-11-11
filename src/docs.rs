@@ -5,26 +5,26 @@
 //! Behind a reverse proxy that strips a prefix, set `BASE_PATH` so the browser
 //! loads the spec and calls the API through that prefix.
 
-use utoipa::{
-    Modify, OpenApi,
-    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
-};
 use axum::{
     extract::{Request, State},
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
 use utoipa::openapi::Server;
+use utoipa::{
+    Modify, OpenApi,
+    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
+};
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
-use crate::{auth::TOKEN_HEADER, scripts, services, status};
+use crate::{auth::TOKEN_HEADER, backups, scripts, services, status};
 
 /// The API description, collected from the `#[utoipa::path]` annotations.
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "service-maintainer", description = "Runs per-service bash scripts and reports Docker service status."),
-    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status),
-    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health)),
+    info(title = "service-maintainer", description = "Runs per-service bash scripts, reports Docker service status and lists / restores MongoDB backups."),
+    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status, backups::list_backups, backups::restore_backup),
+    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health, backups::BackupList, backups::BackupFile, backups::RestoreRequest, backups::RestoreResult)),
     modifiers(&SecurityToken),
     security(("security_token" = []))
 )]
@@ -35,10 +35,13 @@ struct SecurityToken;
 
 impl Modify for SecurityToken {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        openapi.components.get_or_insert_with(Default::default).add_security_scheme(
-            "security_token",
-            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(TOKEN_HEADER))),
-        );
+        openapi
+            .components
+            .get_or_insert_with(Default::default)
+            .add_security_scheme(
+                "security_token",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(TOKEN_HEADER))),
+            );
     }
 }
 
@@ -80,6 +83,7 @@ mod tests {
         let json = ApiDoc::openapi().to_json().unwrap();
         assert!(json.contains("/services/{service_name}/run"));
         assert!(json.contains("/services/status"));
+        assert!(json.contains("/backups/restore") && json.contains("RestoreRequest"));
         assert!(json.contains(TOKEN_HEADER));
     }
 

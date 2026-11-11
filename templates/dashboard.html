@@ -55,6 +55,8 @@ tbody tr{cursor:pointer}tbody tr:hover{background:var(--panel2)}
 pre{background:var(--panel2);padding:10px;border-radius:8px;overflow:auto;max-height:300px;white-space:pre-wrap}
 .toggle{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
 .toggle button{border:0;border-radius:0}.toggle button.on{background:var(--accent);color:#fff}
+nav.tabs{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+nav.tabs a{padding:6px 12px;color:var(--text);text-decoration:none}nav.tabs a:hover{background:var(--panel2)}nav.tabs a.on{background:var(--accent);color:#fff}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--unk);display:inline-block}
 .dot.live{background:var(--ok);animation:p 1.5s infinite}@keyframes p{50%{opacity:.3}}
 .toasts{position:fixed;bottom:16px;inset-inline-end:16px;display:flex;flex-direction:column;gap:10px;z-index:20;max-width:min(420px,calc(100% - 32px))}
@@ -69,6 +71,7 @@ button.sm{padding:3px 9px;font-size:12px}button:disabled{opacity:.5;cursor:not-a
 <body>
 <header>
   <h1><span class="logo"></span>Service Maintainer</h1>
+  <nav class="tabs"><a href="dashboard" class="on">Services</a><a href="backups/dashboard">Backups</a></nav>
   <span class="muted" id="updated"></span>
   <span class="spacer"></span>
   <input type="password" id="token" placeholder="x-security-token" autocomplete="off" style="width:180px">
