@@ -23,6 +23,7 @@ cargo build --release
 | `BASE_PATH`      | no       | (empty)   | Public prefix behind a proxy, e.g. `/maintain`, so Swagger works |
 | `BACKUP_SSH_TARGET`     | no | `qeng@192.168.0.83`          | ssh target of the backup host (used by the backup scripts) |
 | `BACKUP_SSH_KEY`        | no | `~/.ssh/id_qeng_2027`        | Private key the backup scripts use for ssh     |
+| `BACKUP_SSH_PORT`       | no | `10022`                      | ssh port of the backup host                    |
 | `BACKUP_REMOTE_DIR`     | no | `/home/qeng/mongo-backups`   | Backups folder on that host                    |
 | `BACKUP_RESTORE_SCRIPT` | no | `/home/qeng/restore-db.sh`   | Restore script on that host (`<db> <file>`)    |
 
