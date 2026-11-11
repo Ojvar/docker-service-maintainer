@@ -2,7 +2,7 @@
 # Restores one MongoDB backup on the backup host. Used by POST /backups/restore.
 # Usage: restore-backup.sh <restore_db_name> <backup_file_name>
 # Runs on the host: restore-db.sh <restore_db_name> <BACKUP_REMOTE_DIR>/<backup_file_name>
-# Env: BACKUP_SSH_TARGET (default qeng@192.168.0.83), BACKUP_REMOTE_DIR (default /home/qeng/mongo-backups),
+# Env: BACKUP_SSH_TARGET (default qeng@192.168.0.83), BACKUP_SSH_KEY (default ~/.ssh/id_qeng_2027), BACKUP_REMOTE_DIR (default /home/qeng/mongo-backups),
 #      BACKUP_RESTORE_SCRIPT (default /home/qeng/restore-db.sh)
 set -euo pipefail
 
@@ -23,9 +23,10 @@ if [[ ! "$backup" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]]; then
 fi
 
 target="${BACKUP_SSH_TARGET:-qeng@192.168.0.83}"
+key="${BACKUP_SSH_KEY:-$HOME/.ssh/id_qeng_2027}"
 dir="${BACKUP_REMOTE_DIR:-/home/qeng/mongo-backups}"
 restore="${BACKUP_RESTORE_SCRIPT:-/home/qeng/restore-db.sh}"
 
 echo "restoring $backup into $db on $target"
-ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" \
+ssh -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" \
   "$(printf '%q %q %q' "$restore" "$db" "$dir/$backup")"
