@@ -22,10 +22,12 @@ use crate::{
 pub const LIST_SERVICES_JSON_SCRIPT: &str = "list-docker-services-json.sh";
 
 /// Helper scripts that are not per-service maintenance scripts.
-const HELPER_SCRIPTS: [&str; 3] = [
+const HELPER_SCRIPTS: [&str; 5] = [
     "list-docker-services",
     "list-docker-services-json",
     "reload-docker-service",
+    "list-backups",
+    "restore-backup",
 ];
 
 /// Script (inside `SCRIPTS_DIR`) that force-updates one Docker service, given its name as `$1`.

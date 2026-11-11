@@ -17,14 +17,14 @@ use utoipa::{
 };
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
-use crate::{auth::TOKEN_HEADER, scripts, services, status};
+use crate::{auth::TOKEN_HEADER, backups, scripts, services, status};
 
 /// The API description, collected from the `#[utoipa::path]` annotations.
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "service-maintainer", description = "Runs per-service bash scripts and reports Docker service status."),
-    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status),
-    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health)),
+    info(title = "service-maintainer", description = "Runs per-service bash scripts, reports Docker service status and lists / restores MongoDB backups."),
+    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status, backups::list_backups, backups::restore_backup),
+    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health, backups::BackupList, backups::BackupFile, backups::RestoreRequest, backups::RestoreResult)),
     modifiers(&SecurityToken),
     security(("security_token" = []))
 )]
@@ -83,6 +83,7 @@ mod tests {
         let json = ApiDoc::openapi().to_json().unwrap();
         assert!(json.contains("/services/{service_name}/run"));
         assert!(json.contains("/services/status"));
+        assert!(json.contains("/backups/restore") && json.contains("RestoreRequest"));
         assert!(json.contains(TOKEN_HEADER));
     }
 
