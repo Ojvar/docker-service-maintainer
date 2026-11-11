@@ -161,7 +161,7 @@ Runs `scripts/restore-backup.sh <database> <backup>`, which runs on the backup h
 
 Requirements on the machine running service-maintainer (e.g. inside its container):
 an `ssh` client, and a key that logs in to `BACKUP_SSH_TARGET` without a password
-(the scripts use `BatchMode=yes`; unknown host keys are accepted on first connect).
+(the scripts use `BatchMode=yes`, so the host key must already be in `known_hosts`, e.g. via `ssh-keyscan`).
 
 ### Backups dashboard
 

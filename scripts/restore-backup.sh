@@ -29,5 +29,5 @@ dir="${BACKUP_REMOTE_DIR:-/home/qeng/mongo-backups}"
 restore="${BACKUP_RESTORE_SCRIPT:-/home/qeng/restore-db.sh}"
 
 echo "restoring $backup into $db on $target"
-ssh -i "$key" -p "$port" -o IdentitiesOnly=yes -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" \
+ssh -i "$key" -p "$port" -o IdentitiesOnly=yes -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 "$target" \
   "$(printf '%q %q %q' "$restore" "$db" "$dir/$backup")"

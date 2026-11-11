@@ -9,5 +9,5 @@ key="${BACKUP_SSH_KEY:-$HOME/.ssh/id_qeng_2027}"
 port="${BACKUP_SSH_PORT:-10022}"
 dir="${BACKUP_REMOTE_DIR:-/home/qeng/mongo-backups}"
 
-ssh -i "$key" -p "$port" -o IdentitiesOnly=yes -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" \
+ssh -i "$key" -p "$port" -o IdentitiesOnly=yes -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 "$target" \
   "find $(printf '%q' "$dir") -maxdepth 1 -type f -printf '%T@\t%s\t%f\n'" | sort -rn
