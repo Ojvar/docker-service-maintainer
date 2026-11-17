@@ -8,10 +8,14 @@
 //! - `GET  /services/status` returns an HTML report of Docker services
 //! - `GET  /backups` lists MongoDB backup files on the backup host
 //! - `POST /backups/restore` restores one backup into a database
+//! - `GET  /servers` lists the monitored servers with their last collected data
+//! - `GET  /servers/{server_id}` returns one server with the full collected data
+//! - `POST /servers/refresh` collects all servers over ssh in the background
+//! - `POST /servers/{server_id}/refresh` collects one server in the background
 //!
 //! Public: `GET /api` serves Swagger UI, generated from the code by `utoipa`,
-//! `GET /dashboard` serves the admin dashboard and `GET /backups/dashboard`
-//! the backups page (both ask for the token).
+//! `GET /dashboard` serves the admin dashboard, `GET /backups/dashboard`
+//! the backups page and `GET /servers/dashboard` the servers page (all ask for the token).
 
 mod auth;
 mod backups;
@@ -19,6 +23,7 @@ mod config;
 mod dashboard;
 mod docs;
 mod scripts;
+mod servers;
 mod services;
 mod status;
 
@@ -37,6 +42,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Set while a backup restore is running, so only one runs at a time.
     pub restoring: Arc<AtomicBool>,
+    /// Last collected data and running collections of the monitored servers.
+    pub servers: servers::SharedServers,
 }
 
 impl AppState {
@@ -45,6 +52,7 @@ impl AppState {
         Self {
             config: Arc::new(config),
             restoring: Arc::new(AtomicBool::new(false)),
+            servers: servers::SharedServers::default(),
         }
     }
 }
@@ -66,6 +74,13 @@ fn app(state: AppState) -> Router {
         )
         .route("/backups", get(backups::list_backups))
         .route("/backups/restore", post(backups::restore_backup))
+        .route("/servers", get(servers::list_servers))
+        .route("/servers/refresh", post(servers::refresh_all))
+        .route("/servers/{server_id}", get(servers::get_server))
+        .route(
+            "/servers/{server_id}/refresh",
+            post(servers::refresh_server),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -73,6 +88,7 @@ fn app(state: AppState) -> Router {
         .with_state(state)
         .route("/dashboard", get(dashboard::dashboard))
         .route("/backups/dashboard", get(backups::backups_dashboard))
+        .route("/servers/dashboard", get(servers::servers_dashboard))
         .merge(swagger)
         .layer(middleware::from_fn_with_state(
             base_path,
@@ -497,5 +513,152 @@ mod tests {
         let (status, body) = send(app, "GET", "/backups/dashboard", None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("<title>Service Maintainer · Backups"));
+    }
+
+    /// Writes `servers/servers.conf` and a fake `servers/collect-server.sh` into the scripts dir.
+    fn add_servers(dir: &TestDir, collector: &str) {
+        let servers_dir = dir.path().join(servers::SERVERS_DIR);
+        std::fs::create_dir_all(&servers_dir).unwrap();
+        std::fs::write(
+            servers_dir.join(servers::INVENTORY_FILE),
+            "# test inventory\nweb-1 10.0.0.1 22 qeng Web One\ndb-1 10.0.0.2 22 qeng Database\n",
+        )
+        .unwrap();
+        std::fs::write(servers_dir.join(servers::COLLECT_SCRIPT), collector).unwrap();
+    }
+
+    /// Fake collector: `web-1` is reachable, everything else is offline.
+    const FAKE_COLLECTOR: &str = r#"if [ "$1" = web-1 ]; then
+  echo '{"id":"web-1","reachable":true,"duration_ms":5,"data":{"system":{"hostname":"web"},"cpu":{"usage_percent":50.0},"memory":{"used_percent":85.0},"disks":[{"mount":"/","used_percent":10.0}],"unavailable":["temperatures"]}}'
+else
+  echo '{"id":"'"$1"'","reachable":false,"duration_ms":8000,"exit_code":255,"error":"Connection timed out"}'
+fi"#;
+
+    /// Polls `GET /servers` until the latest run has finished (at most ~10s).
+    async fn wait_for_job(app: Router) -> String {
+        for _ in 0..200 {
+            let (_, body) = send(app.clone(), "GET", "/servers", Some(TOKEN)).await;
+            if body.contains(r#""running":false"#) {
+                return body;
+            }
+            tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            })
+            .await
+            .unwrap();
+        }
+        panic!("collection did not finish");
+    }
+
+    #[tokio::test]
+    async fn servers_requires_token() {
+        let (app, _dir) = test_app(&[]);
+        for (method, uri) in [
+            ("GET", "/servers"),
+            ("POST", "/servers/refresh"),
+            ("GET", "/servers/web-1"),
+            ("POST", "/servers/web-1/refresh"),
+        ] {
+            let (status, _) = send(app.clone(), method, uri, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn servers_lists_inventory_before_collection() {
+        let (app, dir) = test_app(&[]);
+        add_servers(&dir, FAKE_COLLECTOR);
+        let (status, body) = send(app, "GET", "/servers", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(
+                r#""id":"web-1","name":"Web One","host":"10.0.0.1","port":22,"status":"unknown""#
+            ),
+            "{body}"
+        );
+        assert!(body.contains(r#""job":null"#) && body.contains(r#""warning_percent":80.0"#));
+        assert!(!body.contains("qeng"), "ssh user is not exposed");
+    }
+
+    #[tokio::test]
+    async fn servers_without_inventory_is_500() {
+        let (app, _dir) = test_app(&[]);
+        let (status, _) = send(app, "GET", "/servers", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn server_ids_are_validated() {
+        let (app, dir) = test_app(&[]);
+        add_servers(&dir, FAKE_COLLECTOR);
+        let (status, _) = send(app.clone(), "GET", "/servers/Bad%20Id", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = send(
+            app.clone(),
+            "POST",
+            "/servers/..%2Fetc/refresh",
+            Some(TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = send(app, "POST", "/servers/other-1/refresh", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_all_collects_in_background() {
+        let (app, dir) = test_app(&[]);
+        add_servers(&dir, FAKE_COLLECTOR);
+        let (status, body) = send(app.clone(), "POST", "/servers/refresh", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(body.contains(r#""total":2"#), "{body}");
+
+        let body = wait_for_job(app.clone()).await;
+        assert!(body.contains(r#""done":2"#), "{body}");
+        assert!(
+            body.contains(r#""status":"online""#) && body.contains(r#""status":"offline""#),
+            "{body}"
+        );
+        assert!(body.contains(r#""level":"warning""#) && body.contains("Connection timed out"));
+
+        let (status, body) = send(app, "GET", "/servers/web-1", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(r#""data":{"#) && body.contains(r#""unavailable":["temperatures"]"#),
+            "{body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_one_server() {
+        let (app, dir) = test_app(&[]);
+        add_servers(&dir, FAKE_COLLECTOR);
+        let (status, body) = send(app.clone(), "POST", "/servers/db-1/refresh", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(body.contains(r#""collecting":true"#), "{body}");
+        for _ in 0..200 {
+            let (_, body) = send(app.clone(), "GET", "/servers/db-1", Some(TOKEN)).await;
+            if body.contains(r#""collecting":false"#) {
+                assert!(
+                    body.contains(r#""status":"offline""#) && body.contains(r#""stale":false"#),
+                    "{body}"
+                );
+                return;
+            }
+            tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            })
+            .await
+            .unwrap();
+        }
+        panic!("collection did not finish");
+    }
+
+    #[tokio::test]
+    async fn servers_dashboard_is_public_html() {
+        let (app, _dir) = test_app(&[]);
+        let (status, body) = send(app, "GET", "/servers/dashboard", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<title>Service Maintainer · Servers"));
     }
 }

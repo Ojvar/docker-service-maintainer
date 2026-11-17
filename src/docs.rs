@@ -17,14 +17,14 @@ use utoipa::{
 };
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
-use crate::{auth::TOKEN_HEADER, backups, scripts, services, status};
+use crate::{auth::TOKEN_HEADER, backups, scripts, servers, services, status};
 
 /// The API description, collected from the `#[utoipa::path]` annotations.
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "service-maintainer", description = "Runs per-service bash scripts, reports Docker service status and lists / restores MongoDB backups."),
-    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status, backups::list_backups, backups::restore_backup),
-    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health, backups::BackupList, backups::BackupFile, backups::RestoreRequest, backups::RestoreResult)),
+    info(title = "service-maintainer", description = "Runs per-service bash scripts, reports Docker service status, lists / restores MongoDB backups and monitors servers over ssh."),
+    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status, backups::list_backups, backups::restore_backup, servers::list_servers, servers::get_server, servers::refresh_all, servers::refresh_server),
+    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health, backups::BackupList, backups::BackupFile, backups::RestoreRequest, backups::RestoreResult, servers::ServerList, servers::ServerView, servers::ServerSummary, servers::ServerStatus, servers::Level, servers::JobStatus, servers::Thresholds)),
     modifiers(&SecurityToken),
     security(("security_token" = []))
 )]
@@ -84,6 +84,7 @@ mod tests {
         assert!(json.contains("/services/{service_name}/run"));
         assert!(json.contains("/services/status"));
         assert!(json.contains("/backups/restore") && json.contains("RestoreRequest"));
+        assert!(json.contains("/servers/{server_id}/refresh") && json.contains("ServerList"));
         assert!(json.contains(TOKEN_HEADER));
     }
 
