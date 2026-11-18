@@ -12,6 +12,9 @@
 //! - `GET  /servers/{server_id}` returns one server with the full collected data
 //! - `POST /servers/refresh` collects all servers over ssh in the background
 //! - `POST /servers/{server_id}/refresh` collects one server in the background
+//! - `GET  /servers/{server_id}/history` returns stored samples for trend charts
+//! - `GET  /servers/{server_id}/containers/{c}`, `/units/{u}`: read-only detail lookups
+//! - `GET  /servers/alerts`, `GET /servers/audit`: recent alerts and the refresh/lookup log
 //!
 //! Public: `GET /api` serves Swagger UI, generated from the code by `utoipa`,
 //! `GET /dashboard` serves the admin dashboard, `GET /backups/dashboard`
@@ -42,17 +45,18 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Set while a backup restore is running, so only one runs at a time.
     pub restoring: Arc<AtomicBool>,
-    /// Last collected data and running collections of the monitored servers.
-    pub servers: servers::SharedServers,
+    /// Collected data, history, alerts and running collections of the monitored servers.
+    pub servers: Arc<servers::Servers>,
 }
 
 impl AppState {
     /// Wraps the config with fresh shared state.
     pub fn new(config: Config) -> Self {
+        let servers = Arc::new(servers::Servers::new(config.servers.clone()));
         Self {
             config: Arc::new(config),
             restoring: Arc::new(AtomicBool::new(false)),
-            servers: servers::SharedServers::default(),
+            servers,
         }
     }
 }
@@ -76,10 +80,21 @@ fn app(state: AppState) -> Router {
         .route("/backups/restore", post(backups::restore_backup))
         .route("/servers", get(servers::list_servers))
         .route("/servers/refresh", post(servers::refresh_all))
+        .route("/servers/alerts", get(servers::alerts::list_alerts))
+        .route("/servers/audit", get(servers::list_audit))
         .route("/servers/{server_id}", get(servers::get_server))
         .route(
             "/servers/{server_id}/refresh",
             post(servers::refresh_server),
+        )
+        .route("/servers/{server_id}/history", get(servers::server_history))
+        .route(
+            "/servers/{server_id}/containers/{container}",
+            get(servers::detail::container_detail),
+        )
+        .route(
+            "/servers/{server_id}/units/{unit}",
+            get(servers::detail::unit_detail),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -122,9 +137,13 @@ async fn main() {
         });
 
     println!("service-maintainer v{VERSION} listening on http://{addr}");
-    axum::serve(listener, app(state))
-        .await
-        .expect("server error");
+    // Peer addresses are recorded in the Servers audit log.
+    axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .expect("server error");
 }
 
 /// Minimal self-deleting temp directory, so tests need no extra crate.
@@ -188,6 +207,7 @@ mod tests {
             security_token: TOKEN.into(),
             scripts_dir: dir.path().to_path_buf(),
             base_path: String::new(),
+            servers: servers::Settings::default(),
         };
         (AppState::new(config), dir)
     }
@@ -652,6 +672,150 @@ fi"#;
             .unwrap();
         }
         panic!("collection did not finish");
+    }
+
+    /// Fake collector with a container, a failed unit and the detail modes.
+    const DETAIL_COLLECTOR: &str = r#"case "$2" in
+  container) echo '{"id":"web-1","reachable":true,"data":{"name":"'"$3"'","state":{"status":"running"}}}' ;;
+  unit) echo '{"id":"web-1","reachable":true,"data":{"unit":"'"$3"'","logs_available":true,"logs":["boom"]}}' ;;
+  *) echo '{"id":"web-1","reachable":true,"duration_ms":5,"data":{"cpu":{"usage_percent":95.0},"docker":{"containers":[{"id":"abc123","name":"web.1"}]},"services":{"running":[],"failed":[{"unit":"bad.service"}]},"unavailable":[]}}' ;;
+esac"#;
+
+    /// Router whose servers settings allow back-to-back refreshes unless `min_interval` is set.
+    fn servers_app(collector: &str, min_interval: u64) -> (Router, TestDir) {
+        let (mut state, dir) = test_state(&[]);
+        add_servers(&dir, collector);
+        let mut config = (*state.config).clone();
+        config.servers.refresh_min_interval_secs = min_interval;
+        state = AppState::new(config);
+        (app(state), dir)
+    }
+
+    #[tokio::test]
+    async fn new_servers_routes_require_token() {
+        let (app, _dir) = test_app(&[]);
+        for uri in [
+            "/servers/alerts",
+            "/servers/audit",
+            "/servers/web-1/history",
+            "/servers/web-1/containers/web.1",
+            "/servers/web-1/units/bad.service",
+        ] {
+            let (status, _) = send(app.clone(), "GET", uri, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_is_rate_limited_and_audited() {
+        let (app, _dir) = servers_app(FAKE_COLLECTOR, 60);
+        let (status, _) = send(app.clone(), "POST", "/servers/refresh", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        wait_for_job(app.clone()).await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/servers/refresh")
+            .header(auth::TOKEN_HEADER, TOKEN)
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry: u64 = res.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&retry));
+        let (status, _) = send(app.clone(), "POST", "/servers/web-1/refresh", Some(TOKEN)).await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "per-server limit too"
+        );
+
+        let (status, body) = send(app, "GET", "/servers/audit", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(r#""result":"rate_limited""#) && body.contains(r#""result":"started""#),
+            "{body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_and_alerts_after_collection() {
+        let (app, _dir) = servers_app(DETAIL_COLLECTOR, 0);
+        send(app.clone(), "POST", "/servers/refresh", Some(TOKEN)).await;
+        let body = wait_for_job(app.clone()).await;
+        assert!(body.contains(r#""recent":["#), "{body}");
+        let (status, body) = send(
+            app.clone(),
+            "GET",
+            "/servers/web-1/history?hours=6",
+            Some(TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(r#""hours":6"#) && body.contains(r#""cpu":95.0"#),
+            "{body}"
+        );
+        let (_, body) = send(app.clone(), "GET", "/servers/alerts", Some(TOKEN)).await;
+        assert!(
+            body.contains(r#""kind":"critical""#)
+                && body.contains(r#""delivery":"not_configured""#),
+            "{body}"
+        );
+        let (status, _) = send(app, "GET", "/servers/nope-1/history", Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detail_lookups_only_for_collected_targets() {
+        let (app, _dir) = servers_app(DETAIL_COLLECTOR, 0);
+        let (status, _) = send(
+            app.clone(),
+            "GET",
+            "/servers/web-1/containers/web.1",
+            Some(TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "nothing collected yet");
+        send(app.clone(), "POST", "/servers/refresh", Some(TOKEN)).await;
+        wait_for_job(app.clone()).await;
+
+        let (status, body) = send(
+            app.clone(),
+            "GET",
+            "/servers/web-1/containers/web.1",
+            Some(TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""name":"web.1""#), "{body}");
+        let (status, body) = send(
+            app.clone(),
+            "GET",
+            "/servers/web-1/units/bad.service",
+            Some(TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""logs":["boom"]"#), "{body}");
+        for (uri, expected) in [
+            ("/servers/web-1/containers/other", StatusCode::NOT_FOUND),
+            ("/servers/web-1/units/ssh.service", StatusCode::NOT_FOUND),
+            ("/servers/web-1/containers/%24(id)", StatusCode::BAD_REQUEST),
+            ("/servers/web-1/units/x.socket", StatusCode::BAD_REQUEST),
+        ] {
+            let (status, _) = send(app.clone(), "GET", uri, Some(TOKEN)).await;
+            assert_eq!(status, expected, "{uri}");
+        }
+        let (_, body) = send(app, "GET", "/servers/audit", Some(TOKEN)).await;
+        assert!(
+            body.contains(r#""action":"container_detail""#)
+                && body.contains(r#""action":"unit_detail""#),
+            "{body}"
+        );
     }
 
     #[tokio::test]

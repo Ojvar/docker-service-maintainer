@@ -115,6 +115,10 @@ dl.kv dt{color:var(--muted)}dl.kv dd{margin:0;word-break:break-word}
 .toast.err{border-inline-start-color:var(--bad)}
 .toast .x{float:inline-end;background:none;border:0;padding:0 4px}
 @media(max-width:700px){main{padding:12px}header{padding:12px}.hide-sm{display:none}dl.kv{grid-template-columns:110px 1fr}}
+tr.click{cursor:pointer}tr.sel{background:var(--panel2)}
+pre.logs{margin:0;padding:10px 14px;max-height:360px;overflow:auto;font:12px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+.seg{display:inline-flex;gap:4px}.seg button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.panel>h3 .grow{flex:1}
 </style>
 </head>
 <body>
@@ -141,9 +145,13 @@ dl.kv dt{color:var(--muted)}dl.kv dd{margin:0;word-break:break-word}
     <select id="fLevel"><option value="">Any usage</option><option value="warning">Warning or worse</option><option value="critical">Critical</option></select>
     <select id="sort"><option value="">Inventory order</option><option value="name">Name</option><option value="status">Status</option><option value="cpu">CPU ↓</option><option value="mem">RAM ↓</option><option value="disk">Disk ↓</option></select>
     <button id="reset">Reset</button>
+    <select id="view" title="Layout"><option value="cards">Cards</option><option value="table">Table</option></select>
+    <button id="csv" title="Download the servers shown as CSV">⬇ CSV</button>
   </section>
   <section class="grid" id="cards"></section>
   <section class="panel" id="fleet"></section>
+  <section class="panel" id="activity" style="margin-top:18px"><h3><span>Activity</span><span class="grow muted" id="actInfo" style="font-weight:400"></span>
+    <span class="seg"><button data-act="alerts">Alerts</button><button data-act="audit">Audit log</button></span></h3><div id="actBody"></div></section>
 </main>
 <div class="modal-bg" id="modalBg"><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
 <div class="toasts" id="toasts"></div>
@@ -151,7 +159,7 @@ dl.kv dt{color:var(--muted)}dl.kv dd{margin:0;word-break:break-word}
 "use strict";
 // Relative to <BASE_PATH>/servers/dashboard, so it works behind a path-stripping proxy.
 const API = "../servers";
-const TOKEN_KEY = "sm.token", LOOK_KEY = "sm.prefs", PREFS_KEY = "sm.servers.prefs", HIST_KEY = "sm.servers.history";
+const TOKEN_KEY = "sm.token", LOOK_KEY = "sm.prefs", PREFS_KEY = "sm.servers.prefs";
 const STATUS_CLASS = { online: "healthy", partial: "degraded", offline: "down", unknown: "unknown" };
 const STATUS_TEXT = { online: "Online", partial: "Partial data", offline: "Offline", unknown: "Not collected" };
 const STATUS_ORDER = { offline: 0, partial: 1, unknown: 2, online: 3 };
@@ -167,14 +175,16 @@ const look = readJson(LOOK_KEY, {});
 const prefs = readJson(PREFS_KEY, {});
 const state = {
   servers: [], job: null, thresholds: { warning_percent: 80, critical_percent: 90 }, inventoryErrors: [],
-  history: readJson(HIST_KEY, {}), detail: null, detailId: null, tab: "overview", pollTimer: null, autoTimer: null,
+  detail: null, trend: null, ctr: null, unit: null, act: null, info: {}, detailId: null, tab: "overview", pollTimer: null, autoTimer: null,
   theme: look.theme || "dark", dir: look.dir || "ltr", loaded: false, autoStarted: false, lastJobId: null, filters: {},
 };
 const savePrefs = () => {
-  localStorage.setItem(PREFS_KEY, JSON.stringify({ sort: $("sort").value, auto: $("auto").checked, interval: $("interval").value }));
+  localStorage.setItem(PREFS_KEY, JSON.stringify({ sort: $("sort").value, auto: $("auto").checked, interval: $("interval").value, view: $("view").value }));
   localStorage.setItem(LOOK_KEY, JSON.stringify({ ...readJson(LOOK_KEY, {}), theme: state.theme, dir: state.dir }));
 };
 const token = () => localStorage.getItem(TOKEN_KEY) || "";
+// History now lives on the server; drop what older versions kept in this browser.
+localStorage.removeItem("sm.servers.history");
 
 /* ---------- formatting ---------- */
 const UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
@@ -250,6 +260,7 @@ const kv = (pairs) => `<dl class="kv">${pairs.map(([k, v]) => `<dt>${esc(k)}</dt
 async function api(path, opts = {}) {
   const res = await fetch(path, { ...opts, headers: { "x-security-token": token(), ...(opts.headers || {}) } });
   if (res.status === 401) throw new Error("Unauthorized: enter a valid security token.");
+  if (res.status === 429) throw new Error(`Refreshed too recently. Try again in ${res.headers.get("retry-after") || "a few"} s.`);
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json();
 }
@@ -264,11 +275,12 @@ async function load() {
     state.job = data.job;
     state.thresholds = data.thresholds || state.thresholds;
     state.inventoryErrors = data.inventory_errors || [];
+    state.info = { persisted: data.persisted, history_days: data.history_days, webhook: data.alerts_webhook, concurrency: data.concurrency, min: data.refresh_min_interval_secs };
     state.loaded = true;
     showError(state.inventoryErrors.length ? "Inventory lines skipped: " + state.inventoryErrors.join("; ") : "");
     $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
-    recordHistory();
     notifyFinished(before);
+    if (state.act && !busy()) loadActivity(true);
     if (state.detailId) {
       const now = state.servers.find((s) => s.id === state.detailId), was = before.get(state.detailId);
       if (now && (!state.detail || !was || now.last_success_at !== was.last_success_at || now.collecting !== was.collecting || now.status !== was.status)) loadDetail(state.detailId, true);
@@ -319,22 +331,9 @@ async function refreshOne(id) {
 async function loadDetail(id, quiet) {
   try {
     const v = await api(`${API}/${encodeURIComponent(id)}`);
-    if (state.detailId === id) { state.detail = v; renderDetail(); }
+    if (state.detailId === id) { state.detail = v; renderDetail(); loadTrend(id, state.trend?.hours || 24, true); }
   } catch (e) { if (!quiet) toast("Could not load server details", e.message, false); }
 }
-function recordHistory() {
-  let changed = false;
-  for (const s of state.servers) {
-    if (!s.summary || !s.last_success_at) continue;
-    const list = state.history[s.id] || (state.history[s.id] = []);
-    if (list.length && list[list.length - 1].t === s.last_success_at) continue;
-    list.push({ t: s.last_success_at, cpu: s.summary.cpu_percent, mem: s.summary.memory_percent, disk: s.summary.disk_percent });
-    if (list.length > 60) list.splice(0, list.length - 60);
-    changed = true;
-  }
-  if (changed) localStorage.setItem(HIST_KEY, JSON.stringify(state.history));
-}
-
 /* ---------- overview ---------- */
 const level = (s) => (s.summary ? s.summary.level : "unknown");
 function render() {
@@ -382,8 +381,9 @@ function renderCards() {
   if (!state.loaded) { $("cards").innerHTML = `<div class="panel empty" style="grid-column:1/-1">${token() ? '<span class="spin"></span> Loading…' : "Enter your token to see the servers."}</div>`; return; }
   const list = filtered();
   if (!list.length) { $("cards").innerHTML = '<div class="panel empty" style="grid-column:1/-1">No servers match the filters.</div>'; return; }
+  if ($("view").value === "table") { $("cards").innerHTML = `<div class="panel" style="grid-column:1/-1">${serverTable(list)}</div>`; return; }
   $("cards").innerHTML = list.map((s) => {
-    const m = s.summary, hist = state.history[s.id] || [], lv = level(s);
+    const m = s.summary, hist = s.recent || [], lv = level(s);
     return `<article class="card st-${esc(s.status)} lvl-${esc(lv)}" data-open="${esc(s.id)}" tabindex="0">
       <div class="top">${statusBadge(s)}<span class="name">${esc(s.name)}</span>
         ${lv === "warning" || lv === "critical" ? `<span class="lvl ${lv}">${lv}</span>` : ""}
@@ -393,7 +393,7 @@ function renderCards() {
       <div style="margin-top:10px">
         ${meter("CPU", m?.cpu_percent, m?.logical_cores ? `${m.logical_cores} cores` : "")}
         ${meter("RAM", m?.memory_percent)}
-        ${meter("Disk", m?.disk_percent, m?.disk_mount ? `Fullest partition: ${m.disk_mount}` : "")}
+        ${meter("Disk", m?.disk_percent, (m?.disk_mount ? `Fullest partition: ${m.disk_mount}` : "") + (m?.network_shares ? ` · ${m.network_shares} network share(s) not counted` : ""))}
       </div>
       ${hist.length > 1 ? `<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-label="CPU and RAM history">${sparkline(hist, "mem", "#22d3ee")}${sparkline(hist, "cpu", "#7c5cff")}</svg>` : ""}
       <div class="foot"><span title="Uptime">⏱ ${esc(duration(m?.uptime_seconds))}</span>
@@ -405,6 +405,30 @@ function renderCards() {
       ${s.status === "partial" ? `<div class="stale">Missing: ${esc(s.unavailable.filter((u) => u !== "temperatures").map((u) => SECTION_TEXT[u] || u).join(", "))}</div>` : ""}
     </article>`;
   }).join("");
+}
+function serverTable(list) {
+  const cell = (v) => `<td>${v != null ? inlineBar(v) : "—"}</td>`;
+  return table(["Status", "Name", "Address", "Hostname", "OS", "CPU", "RAM", "Disk", "Load", "Uptime", "Containers", "Collected", ""], list.map((s) => {
+    const m = s.summary || {};
+    return `<tr class="click" data-open="${esc(s.id)}"><td>${statusBadge(s)}</td><td><b>${esc(s.name)}</b>${s.stale ? ' <span class="muted" title="Latest attempt failed">(old data)</span>' : ""}</td>
+      <td class="mono">${esc(s.host)}</td><td class="mono">${esc(m.hostname || "—")}</td><td>${esc(m.os || "—")}</td>${cell(m.cpu_percent)}${cell(m.memory_percent)}${cell(m.disk_percent)}
+      <td>${m.load_1 ?? "—"}</td><td>${esc(duration(m.uptime_seconds))}</td><td>${m.containers_running ?? "—"}</td>
+      <td title="${esc(absTime(s.last_success_at))}">${esc(relTime(s.last_success_at))}</td>
+      <td><button class="sm" data-refresh="${esc(s.id)}" title="Refresh this server" ${s.collecting ? "disabled" : ""}>⟳</button></td></tr>`;
+  }));
+}
+// Spreadsheet-safe CSV of the servers currently shown (filters and sort apply).
+function exportCsv() {
+  const iso = (t) => (t ? new Date(t * 1000).toISOString() : "");
+  const heads = ["id", "name", "host", "port", "status", "level", "stale", "hostname", "os", "cpu_percent", "memory_percent", "disk_percent", "fullest_disk", "load_1", "uptime_seconds", "logical_cores", "containers_running", "last_success", "last_attempt", "last_error"];
+  const rows = filtered().map((s) => { const m = s.summary || {};
+    return [s.id, s.name, s.host, s.port, s.status, level(s), s.stale, m.hostname, m.os, m.cpu_percent, m.memory_percent, m.disk_percent, m.disk_mount, m.load_1, m.uptime_seconds, m.logical_cores, m.containers_running, iso(s.last_success_at), iso(s.last_attempt_at), s.last_error]; });
+  const cell = (v) => { let t = v == null ? "" : String(v); if (/^[=+\-@\t\r]/.test(t)) t = "'" + t; return /[",\r\n']/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const csv = [heads, ...rows].map((r) => r.map(cell).join(",")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `servers-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.csv`;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 function renderFleet() {
   const list = state.servers.filter((s) => s.summary);
@@ -431,10 +455,42 @@ function renderFleet() {
     <div class="legend"><span><i style="background:${colors[0]}"></i>CPU</span><span><i style="background:${colors[1]}"></i>RAM</span><span><i style="background:${colors[2]}"></i>Fullest disk</span><span class="muted">Faded bars: older data from an unreachable server</span></div>`;
 }
 
+/* ---------- alerts & audit ---------- */
+async function loadActivity(quiet) {
+  const kind = state.act;
+  if (!kind) return;
+  try {
+    const data = await api(`${API}/${kind}`);
+    if (state.act !== kind) return;
+    state.actData = data; renderActivity();
+  } catch (e) { if (!quiet) { state.actData = { error: e.message }; renderActivity(); } }
+}
+function renderActivity() {
+  const i = state.info;
+  $("actInfo").textContent = i.history_days ? `${i.persisted ? `History kept ${i.history_days} days on the server` : "History not saved (SERVERS_DATA_DIR off)"} · webhook ${i.webhook ? "on" : "off"} · ${i.concurrency} at a time · refresh limit ${i.min}s` : "";
+  document.querySelectorAll("[data-act]").forEach((b) => b.classList.toggle("on", b.dataset.act === state.act));
+  const el = $("actBody"), d = state.actData;
+  if (!state.act) { el.innerHTML = '<div class="muted" style="padding:10px 14px">Show recent alerts (offline, recovered, warning and critical changes) or the log of refreshes and lookups.</div>'; return; }
+  if (!d) { el.innerHTML = '<div class="empty"><span class="spin"></span> Loading…</div>'; return; }
+  if (d.error) { el.innerHTML = `<div class="note bad" style="margin:10px 14px">${esc(d.error)}</div>`; return; }
+  const when = (t) => `<td title="${esc(absTime(t))}">${esc(relTime(t))}</td>`;
+  if (state.act === "alerts") {
+    const cls = { offline: "down", critical: "down", warning: "degraded", recovered: "healthy", resolved: "healthy" };
+    el.innerHTML = (d.webhook_configured ? "" : '<div class="muted" style="padding:10px 14px 0">No webhook set (SERVERS_ALERT_WEBHOOK_URL), so alerts are only listed here.</div>') +
+      table(["When", "Server", "Event", "Message", "Delivery"], (d.events || []).map((a) => `<tr>${when(a.at)}<td>${esc(a.server_name)} <span class="mono muted">${esc(a.host)}</span></td>
+        <td><span class="badge ${cls[a.kind] || "unknown"}">${esc(a.kind)}</span></td><td class="wrap">${esc(a.message)}</td><td class="muted">${esc(a.delivery)}</td></tr>`), "No alerts yet.");
+  } else {
+    el.innerHTML = table(["When", "Action", "Server", "Target", "Result", "Client", "User agent"], (d.entries || []).map((a) => `<tr>${when(a.at)}<td class="mono">${esc(a.action)}</td>
+      <td class="mono">${esc(a.server_id || "all")}</td><td class="mono wrap">${esc(a.target || "")}</td><td>${esc(a.result)}</td>
+      <td class="mono">${esc(a.client || "—")}${a.forwarded_for ? ` <span class="muted" title="X-Forwarded-For">via ${esc(a.forwarded_for)}</span>` : ""}</td><td class="wrap muted" style="max-width:280px">${esc(a.user_agent || "")}</td></tr>`), "Nothing logged yet.");
+  }
+}
+
 /* ---------- detail view ---------- */
 const TABS = [["overview", "Overview"], ["hardware", "Hardware"], ["storage", "Storage"], ["network", "Network"], ["processes", "Processes"], ["services", "Services"], ["docker", "Docker"], ["issues", "Issues"]];
 function openDetail(id) {
-  state.detailId = id; state.detail = null; state.tab = "overview"; state.filters = {};
+  state.detailId = id; state.detail = null; state.tab = "overview"; state.filters = {}; state.ctr = null; state.unit = null;
+  if (state.trend?.id !== id) state.trend = { id, hours: state.trend?.hours || 24, points: null };
   $("modalBg").classList.add("open"); document.body.style.overflow = "hidden";
   renderDetail(); loadDetail(id);
 }
@@ -474,7 +530,6 @@ const unavailableNote = (d, key) => (d[key] == null ? `<div class="note warn">${
 function overview(v, d) {
   const s = d.system || {}, c = d.cpu || {}, m = d.memory || {}, h = d.health || {}, sum = v.summary || {};
   const loadPct = h.load_1 != null && c.logical_cores ? (100 * h.load_1) / c.logical_cores : null;
-  const hist = state.history[v.id] || [];
   return `<div class="panel pad"><div class="gauges">
       ${ring(c.usage_percent, "CPU", c.logical_cores ? `${c.logical_cores} cores` : "")}
       ${ring(m.used_percent, "RAM", m.total_bytes ? `${humanSize(m.used_bytes)} of ${humanSize(m.total_bytes)}` : "")}
@@ -497,11 +552,10 @@ function overview(v, d) {
           { label: "used", v: (100 * m.used_bytes) / m.total_bytes, color: "#7c5cff" },
           { label: "cache/buffers (reclaimable)", v: Math.max(0, (100 * (m.available_bytes - m.free_bytes)) / m.total_bytes), color: "#22d3ee" },
           { label: "free", v: (100 * m.free_bytes) / m.total_bytes, color: "var(--unk)" }]) : "—"}
-        ${hist.length > 1 ? `<div class="muted" style="margin-top:12px">Recent collections (this browser): <span style="color:#7c5cff">CPU</span> · <span style="color:#22d3ee">RAM</span> · <span style="color:#f472b6">Disk</span></div>
-          <svg viewBox="0 0 100 30" preserveAspectRatio="none" style="width:100%;height:70px">${sparkline(hist, "disk", "#f472b6")}${sparkline(hist, "mem", "#22d3ee")}${sparkline(hist, "cpu", "#7c5cff")}</svg>` : ""}
         ${kv([["Processes", num(h.processes)], ["Collection time", v.duration_ms != null ? `${(v.duration_ms / 1000).toFixed(1)} s` : "—"], ["Last success", esc(absTime(v.last_success_at))]])}
       </div></div>
-    </div>`;
+    </div>
+    ${trendPanel(v)}`;
 }
 function hardware(v, d) {
   const c = d.cpu || {}, m = d.memory || {}, temps = d.temperatures || [];
@@ -511,13 +565,14 @@ function hardware(v, d) {
     </div>
     <div class="cols">
     <div class="panel"><h3>Block devices</h3>${d.block_devices ? table(["Device", "Size", "Type"], d.block_devices.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${humanSize(b.size_bytes)}</td><td>${b.rotational ? "HDD (rotational)" : "SSD / virtual"}</td></tr>`)) : unavailableNote(d, "block_devices")}</div>
-    <div class="panel"><h3>Temperature</h3>${temps.length ? table(["Sensor", "°C"], temps.map((t) => `<tr><td>${esc(t.sensor)}</td><td><b style="color:${t.celsius >= 85 ? "var(--bad)" : t.celsius >= 70 ? "var(--warn)" : "var(--ok)"}">${esc(t.celsius)}</b></td></tr>`)) : '<div class="empty">No temperature sensors exposed (usual for virtual machines).</div>'}</div>
+    <div class="panel"><h3>Temperature</h3>${temps.length ? table(["Sensor", "Source", "°C"], temps.map((t) => `<tr><td>${esc(t.sensor)}</td><td class="muted">${esc(t.source || "—")}</td><td><b style="color:${t.celsius >= 85 ? "var(--bad)" : t.celsius >= 70 ? "var(--warn)" : "var(--ok)"}">${esc(t.celsius)}</b></td></tr>`)) : '<div class="empty">No temperature sensors exposed (checked thermal zones, hwmon and lm-sensors; usual for virtual machines). Informational only.</div>'}</div>
     </div>`;
 }
 function storage(v, d) {
-  const io = d.disk_io || [];
-  return `<div class="panel"><h3>Partitions</h3>${d.disks ? table(["Mount", "Filesystem", "Type", "Size", "Used", "Free", "Usage", "Inodes"],
-      d.disks.map((x) => `<tr><td class="mono">${esc(x.mount)}</td><td class="mono muted">${esc(x.filesystem)}</td><td>${esc(x.type)}</td><td>${humanSize(x.total_bytes)}</td><td>${humanSize(x.used_bytes)}</td><td>${humanSize(x.available_bytes)}</td><td>${inlineBar(x.used_percent)}</td><td>${pct(x.inodes_used_percent)}</td></tr>`)) : unavailableNote(d, "disks")}</div>
+  const io = d.disk_io || [], shares = (d.disks || []).filter((x) => x.network).length;
+  const usage = (x) => (x.network ? `<span class="bar inline"><i style="width:${clamp(x.used_percent)}%;background:var(--unk)"></i></span>${pct(x.used_percent)}` : inlineBar(x.used_percent));
+  return `<div class="panel"><h3>Partitions</h3>${shares ? `<div class="note info" style="margin:10px 14px">${shares} network share(s) (CIFS, NFS…) are listed for information. Their usage belongs to the remote storage and does not count toward warning or critical.</div>` : ""}${d.disks ? table(["Mount", "Filesystem", "Type", "Size", "Used", "Free", "Usage", "Inodes"],
+      d.disks.map((x) => `<tr><td class="mono">${esc(x.mount)}</td><td class="mono muted">${esc(x.filesystem)}</td><td>${esc(x.type)}${x.network ? ' <span class="badge unknown nodot" title="Not counted toward warning/critical">network share</span>' : ""}</td><td>${humanSize(x.total_bytes)}</td><td>${humanSize(x.used_bytes)}</td><td>${humanSize(x.available_bytes)}</td><td>${usage(x)}</td><td>${pct(x.inodes_used_percent)}</td></tr>`)) : unavailableNote(d, "disks")}</div>
     <div class="panel"><h3>Disk I/O <span class="muted" style="font-weight:400">rates over a 1 s sample · totals since boot</span></h3>${d.disk_io ? table(["Device", "Read/s", "Write/s", "Busy", "Reads", "Writes", "Read total", "Written total"],
       io.map((x) => `<tr><td class="mono">${esc(x.device)}</td><td>${rate(x.read_bytes_per_sec)}</td><td>${rate(x.write_bytes_per_sec)}</td><td>${inlineBar(x.util_percent)}</td><td>${num(x.reads)}</td><td>${num(x.writes)}</td><td>${humanSize(x.read_bytes)}</td><td>${humanSize(x.written_bytes)}</td></tr>`)) : unavailableNote(d, "disk_io")}</div>`;
 }
@@ -551,7 +606,7 @@ function processes(v, d) {
     <div class="panel"><h3>Load average</h3><div class="pad">${loadRow("1 min", h.load_1)}${loadRow("5 min", h.load_5)}${loadRow("15 min", h.load_15)}</div></div>
     <div class="panel"><h3>Processes</h3>${kv([["Processes", num(h.processes)], ["Running now", num(h.running_processes)], ["Threads", num(h.threads)], ["Zombies", h.zombie_processes ? `<b style="color:var(--warn)">${num(h.zombie_processes)}</b>` : "0"]])}</div>
     </div>
-    <div class="panel"><h3>Top by CPU <span class="muted" style="font-weight:400">CPU % is averaged over each process's lifetime (ps); only process names are collected</span></h3>${table(heads, procRows(h.top_cpu))}</div>
+    <div class="panel"><h3>Top by CPU <span class="muted" style="font-weight:400">${h.top_cpu_mode === "sampled" ? "current CPU % over a ~1 s sample (100% = one core)" : "CPU % averaged over each process's lifetime (ps)"}; only process names are collected</span></h3>${table(heads, procRows(h.top_cpu))}</div>
     <div class="panel"><h3>Top by memory</h3>${table(heads, procRows(h.top_memory))}</div>`;
 }
 function services(v, d) {
@@ -559,9 +614,10 @@ function services(v, d) {
   if (!s) return unavailableNote(d, "services");
   const q = (state.filters.svc || "").toLowerCase();
   const running = (s.running || []).filter((x) => !q || x.unit.toLowerCase().includes(q) || x.description.toLowerCase().includes(q));
-  return `${s.failed_count ? `<div class="panel"><h3 style="color:var(--bad)">Failed services (${s.failed_count})</h3>${table(["Unit", "State", "Description"], s.failed.map((x) => `<tr><td class="mono">${esc(x.unit)}</td><td><span class="badge down">${esc(x.sub)}</span></td><td class="wrap">${esc(x.description)}</td></tr>`))}</div>` : '<div class="note info">No failed systemd services.</div>'}
-    <div class="panel"><h3>Running services (${s.running_count}) <input type="search" data-filter="svc" placeholder="Filter…" value="${esc(state.filters.svc || "")}" style="max-width:240px"></h3>
-      ${table(["Unit", "State", "Description"], running.map((x) => `<tr><td class="mono">${esc(x.unit)}</td><td><span class="badge healthy">${esc(x.sub)}</span></td><td class="wrap">${esc(x.description)}</td></tr>`), "No services match.")}</div>`;
+  return `${s.failed_count ? `<div class="panel"><h3 style="color:var(--bad)">Failed services (${s.failed_count})</h3>${table(["Unit", "State", "Description"], s.failed.map((x) => `<tr class="click ${state.unit?.name === x.unit ? "sel" : ""}" data-unit="${esc(x.unit)}" title="Show status and recent logs"><td class="mono">${esc(x.unit)}</td><td><span class="badge down">${esc(x.sub)}</span></td><td class="wrap">${esc(x.description)}</td></tr>`))}</div>` : '<div class="note info">No failed systemd services.</div>'}
+    ${unitLookup()}
+    <div class="panel"><h3>Running services (${s.running_count}) <span class="muted grow" style="font-weight:400">click a row for status and logs</span><input type="search" data-filter="svc" placeholder="Filter…" value="${esc(state.filters.svc || "")}" style="max-width:240px"></h3>
+      ${table(["Unit", "State", "Description"], running.map((x) => `<tr class="click ${state.unit?.name === x.unit ? "sel" : ""}" data-unit="${esc(x.unit)}" title="Show status and recent logs"><td class="mono">${esc(x.unit)}</td><td><span class="badge healthy">${esc(x.sub)}</span></td><td class="wrap">${esc(x.description)}</td></tr>`), "No services match.")}</div>`;
 }
 function docker(v, d) {
   const k = d.docker;
@@ -575,11 +631,12 @@ function docker(v, d) {
       ${[["ok", k.containers_running, "Running"], ["warn", k.containers_paused, "Paused"], ["", k.containers_stopped, "Stopped"], ["", k.images, "Images"]].map(([c, n, l]) => `<div class="stat ${c}"><div class="n">${esc(n ?? "—")}</div><div class="l">${l}</div></div>`).join("")}
     </div>
     <div class="panel"><h3>Engine</h3>${kv([["Status", '<span class="badge healthy">running</span>'], ["Server version", esc(k.server_version)], ["Client version", esc(k.client_version)], ["Storage driver", esc(k.storage_driver)], ["Swarm", `${esc(k.swarm_state || "—")}${k.swarm_state === "active" ? (k.swarm_manager ? " · manager" : " · worker") : ""}`], ["Containers (all)", num(k.containers_total)]])}</div>
-    <div class="panel"><h3>Running containers (${(k.containers || []).length}) <input type="search" data-filter="ctr" placeholder="Filter name, image…" value="${esc(state.filters.ctr || "")}" style="max-width:260px"></h3>
+    <div class="panel"><h3>Running containers (${(k.containers || []).length}) <span class="muted grow" style="font-weight:400">click a row for details</span><input type="search" data-filter="ctr" placeholder="Filter name, image…" value="${esc(state.filters.ctr || "")}" style="max-width:260px"></h3>
       ${!k.stats_available ? '<div class="note warn" style="margin:10px 14px">Live container CPU/memory figures were not available (docker stats timed out).</div>' : ""}
-      ${table(["Name", "Image", "Status", "CPU", "Memory", "Ports"], list.map((c) => `<tr><td class="mono wrap" style="min-width:220px">${esc(c.name)}</td><td class="mono wrap muted">${esc(c.image)}</td>
+      ${table(["Name", "Image", "Status", "CPU", "Memory", "Ports"], list.map((c) => `<tr class="click ${state.ctr?.name === c.name ? "sel" : ""}" data-ctr="${esc(c.name)}" title="Show inspect summary"><td class="mono wrap" style="min-width:220px">${esc(c.name)}</td><td class="mono wrap muted">${esc(c.image)}</td>
         <td><span class="badge ${healthBadge(c.status)}">${esc(c.status)}</span></td><td>${c.cpu_percent != null ? inlineBar(c.cpu_percent) : "—"}</td>
-        <td>${esc(c.mem_usage || "—")}${c.mem_percent != null ? ` <span class="muted">(${pct(c.mem_percent)})</span>` : ""}</td><td class="mono wrap muted">${esc(c.ports || "")}</td></tr>`), "No containers match.")}</div>`;
+        <td>${esc(c.mem_usage || "—")}${c.mem_percent != null ? ` <span class="muted">(${pct(c.mem_percent)})</span>` : ""}</td><td class="mono wrap muted">${esc(c.ports || "")}</td></tr>`), "No containers match.")}</div>
+    ${containerLookup()}`;
 }
 function issues(v, d) {
   const items = (v.unavailable || []).map((u) => `<tr><td>${esc(SECTION_TEXT[u] || u)}</td><td class="mono muted">${esc(u)}</td><td>${u === "temperatures" ? "Informational: does not mark the server as partial" : '<span class="badge degraded">missing</span>'}</td></tr>`);
@@ -587,6 +644,98 @@ function issues(v, d) {
     <div class="panel"><h3>Unavailable metrics</h3>${table(["Metric", "Section", "Effect"], items, "Every metric was collected.")}</div>
     ${d.docker?.error ? `<div class="note warn">Docker: ${esc(d.docker.error)}</div>` : ""}`;
 }
+
+/* ---------- trend chart & lookups ---------- */
+async function loadTrend(id, hours, quiet) {
+  if (!quiet || !state.trend || state.trend.id !== id) state.trend = { id, hours, points: state.trend?.id === id ? state.trend.points : null };
+  state.trend.hours = hours;
+  try {
+    const r = await api(`${API}/${encodeURIComponent(id)}/history?hours=${hours}`);
+    if (state.trend?.id === id && state.trend.hours === hours) { state.trend.points = r.points; state.trend.error = null; }
+  } catch (e) { if (state.trend?.id === id) state.trend.error = e.message; }
+  if (state.detailId === id && state.tab === "overview") $("mbody").innerHTML = detailBody(currentView(), state.detail?.data);
+}
+const RANGES = [[6, "6 h"], [24, "24 h"], [168, "7 days"], [720, "30 days"]];
+function trendPanel(v) {
+  const t = state.trend && state.trend.id === v.id ? state.trend : { hours: 24 };
+  const avail = RANGES.filter(([h]) => h <= (state.info.history_days || 30) * 24 || h === 6);
+  const buttons = `<span class="seg">${avail.map(([h, l]) => `<button class="sm ${t.hours === h ? "on" : ""}" data-hours="${h}">${l}</button>`).join("")}</span>`;
+  let body;
+  if (t.error) body = `<div class="note bad" style="margin:10px 14px">${esc(t.error)}</div>`;
+  else if (!t.points) body = '<div class="empty"><span class="spin"></span> Loading history…</div>';
+  else body = trendChart(t.points, t.hours);
+  return `<div class="panel"><h3><span>Trend <span class="muted" style="font-weight:400">${state.info.persisted === false ? "since the service started" : "stored on the server"}</span></span>${buttons}</h3>${body}
+    <div class="legend"><span><i style="background:#7c5cff"></i>CPU</span><span><i style="background:#22d3ee"></i>RAM</span><span><i style="background:#f472b6"></i>Fullest disk</span><span><i style="background:var(--bad)"></i>Unreachable</span></div></div>`;
+}
+function trendChart(points, hours) {
+  if (points.length < 2) return '<div class="empty">Not enough history yet: each collection adds a point.</div>';
+  const W = 720, H = 200, top = 10, bottom = 24, left = 34, right = 10, plotH = H - top - bottom, plotW = W - left - right;
+  const t1 = Date.now() / 1000, t0 = t1 - hours * 3600;
+  const x = (t) => left + Math.max(0, Math.min(1, (t - t0) / (t1 - t0))) * plotW, y = (v) => top + plotH - (clamp(v) / 100) * plotH;
+  let svg = [0, 50, 100].map((v) => `<line x1="${left}" x2="${W - right}" y1="${y(v)}" y2="${y(v)}" stroke="var(--border)"/><text x="${left - 6}" y="${y(v) + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${v}</text>`).join("");
+  for (const [v, col] of [[state.thresholds.warning_percent, "var(--warn)"], [state.thresholds.critical_percent, "var(--bad)"]])
+    svg += `<line x1="${left}" x2="${W - right}" y1="${y(v)}" y2="${y(v)}" stroke="${col}" stroke-dasharray="4 4" opacity=".6"/>`;
+  const fmt = hours <= 24 ? (d) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : (d) => d.toLocaleDateString([], { month: "short", day: "numeric" });
+  for (let k = 0; k <= 4; k++) { const t = t0 + (k * (t1 - t0)) / 4; svg += `<text x="${x(t)}" y="${H - 6}" text-anchor="${k === 0 ? "start" : k === 4 ? "end" : "middle"}" font-size="10" fill="var(--muted)">${esc(fmt(new Date(t * 1000)))}</text>`; }
+  // Break a line where a value is missing or the gap is much longer than usual.
+  const gaps = points.slice(1).map((p, i) => p.t - points[i].t).sort((a, b) => a - b), maxGap = Math.max(900, 4 * (gaps[Math.floor(gaps.length / 2)] || 0));
+  for (const [key, color] of [["disk", "#f472b6"], ["mem", "#22d3ee"], ["cpu", "#7c5cff"]]) {
+    let d = "", prev = null;
+    for (const p of points) {
+      if (p[key] == null) { prev = null; continue; }
+      d += `${prev && p.t - prev.t <= maxGap ? "L" : "M"}${x(p.t).toFixed(1)},${y(p[key]).toFixed(1)} `; prev = p;
+    }
+    svg += `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.6"/>`;
+  }
+  for (const p of points) if (p.status === "offline") svg += `<rect x="${x(p.t) - 1.5}" y="${top + plotH - 6}" width="3" height="6" fill="var(--bad)"><title>Unreachable ${esc(absTime(p.t))}</title></rect>`;
+  const last = points[points.length - 1];
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}"><title>Latest ${esc(absTime(last.t))}: CPU ${pct(last.cpu)}, RAM ${pct(last.mem)}, disk ${pct(last.disk)}</title>${svg}</svg></div>`;
+}
+async function lookup(kind, name) {
+  const id = state.detailId, key = kind === "containers" ? "ctr" : "unit";
+  if (state[key]?.name === name && !state[key].loading) { state[key] = null; $("mbody").innerHTML = detailBody(currentView(), state.detail?.data); return; }
+  state[key] = { name, loading: true };
+  $("mbody").innerHTML = detailBody(currentView(), state.detail?.data);
+  let result;
+  try { result = { name, data: await api(`${API}/${encodeURIComponent(id)}/${kind}/${encodeURIComponent(name)}`) }; }
+  catch (e) { result = { name, error: e.message }; }
+  if (state.detailId !== id || state[key]?.name !== name) return;
+  state[key] = result;
+  $("mbody").innerHTML = detailBody(currentView(), state.detail?.data);
+  document.getElementById("lookup")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+function lookupShell(l, title, render) {
+  if (!l) return "";
+  const head = `<h3><span>${esc(title)} <span class="mono">${esc(l.name)}</span></span><button class="sm" data-close-lookup>✕</button></h3>`;
+  if (l.loading) return `<div class="panel" id="lookup">${head}<div class="empty"><span class="spin"></span> Asking the server…</div></div>`;
+  if (l.error) return `<div class="panel" id="lookup">${head}<div class="note bad" style="margin:10px 14px">${esc(l.error)}</div></div>`;
+  if (l.data?.error) return `<div class="panel" id="lookup">${head}<div class="note warn" style="margin:10px 14px">${esc(l.data.error)}</div></div>`;
+  return `<div class="panel" id="lookup">${head}${render(l.data)}</div>`;
+}
+const containerLookup = () => lookupShell(state.ctr, "Container", (d) => {
+  const c = d.container || {}, st = c.state || {}, rp = c.restart_policy || {};
+  const date = (s) => (s && !s.startsWith("0001") ? esc(new Date(s).toLocaleString()) : "—");
+  const mounts = (c.mounts || []).map((m) => `<tr><td>${esc(m.Type)}</td><td class="mono wrap">${esc(m.Name || m.Source)}</td><td class="mono wrap">${esc(m.Destination)}</td><td>${m.RW ? "read-write" : "read-only"}</td></tr>`);
+  const nets = Object.entries(c.networks || {}).map(([n, v]) => `<span class="mono">${esc(n)}${v?.IPAddress ? ` (${esc(v.IPAddress)})` : ""}</span>`).join(", ");
+  const ports = Object.entries(c.ports || {}).map(([p, b]) => `<span class="mono">${esc(p)}${b ? " → " + b.map((x) => esc(`${x.HostIp || ""}:${x.HostPort}`)).join(", ") : ""}</span>`).join(", ");
+  return `<div class="cols"><div>${kv([["State", `<span class="badge ${st.running ? "healthy" : "down"}">${esc(st.status)}</span>${st.health ? ` <span class="badge ${st.health === "healthy" ? "healthy" : st.health === "starting" ? "degraded" : "down"}">${esc(st.health)}</span>` : ""}`],
+      ["Started", date(st.started_at)], ["Finished", date(st.finished_at)], ["Exit code", esc(st.exit_code)], ["Error", st.error ? `<span style="color:var(--bad)">${esc(st.error)}</span>` : "none"],
+      ["OOM killed", st.oom_killed ? '<b style="color:var(--bad)">yes</b>' : "no"], ["Restarts", num(c.restart_count)]])}</div>
+    <div>${kv([["Image", `<span class="mono wrap">${esc(c.image)}</span>`], ["Created", date(c.created)], ["Restart policy", esc(rp.Name || "none")],
+      ["Memory limit", c.memory_limit ? humanSize(c.memory_limit) : "none"], ["CPU limit", c.nano_cpus ? `${(c.nano_cpus / 1e9).toFixed(2)} CPUs` : "none"],
+      ["Swarm service", esc(c.swarm_service || "—")], ["Stack", esc(c.stack || "—")], ["Networks", nets || "—"], ["Published ports", ports || "—"]])}</div></div>
+    ${table(["Mount type", "Source", "Destination", "Mode"], mounts, "No mounts.")}
+    <div class="muted" style="padding:8px 14px">Read-only docker inspect summary. Environment variables and container logs are not collected.</div>`;
+});
+const unitLookup = () => lookupShell(state.unit, "Service", (d) => {
+  const u = d.unit || {}, unset = (x) => (!x || x === "[not set]" || x === "n/a" ? "—" : esc(x));
+  const memory = /^\d+$/.test(u.MemoryCurrent || "") ? humanSize(Number(u.MemoryCurrent)) : "—";
+  return `${kv([["Description", unset(u.Description)], ["State", `${esc(u.LoadState)} · <b>${esc(u.ActiveState)}</b> (${esc(u.SubState)})`], ["Result", unset(u.Result)],
+      ["Main PID", u.MainPID && u.MainPID !== "0" ? esc(u.MainPID) : "—"], ["Exit status", unset(u.ExecMainStatus)], ["Restarts", unset(u.NRestarts)],
+      ["Active since", unset(u.ActiveEnterTimestamp)], ["Stopped at", unset(u.InactiveEnterTimestamp)], ["Memory", memory], ["Enabled", unset(u.UnitFileState)], ["Unit file", `<span class="mono">${unset(u.FragmentPath)}</span>`]])}
+    <h3 style="margin:0;padding:10px 14px;font-size:13px;border-top:1px solid var(--border)">Last 50 journal lines</h3>
+    ${d.logs_available ? `<pre class="logs">${esc(d.logs || "(empty)")}</pre>` : `<div class="note warn" style="margin:0 14px 12px">${esc(d.logs_note || "Journal not available.")}</div>`}`;
+});
 
 /* ---------- wiring ---------- */
 function setAuto() {
@@ -601,6 +750,16 @@ function bind() {
   $("sort").value = prefs.sort || "";
   $("auto").checked = !!prefs.auto;
   if (prefs.interval) $("interval").value = prefs.interval;
+  $("view").value = prefs.view === "table" ? "table" : "cards";
+  $("view").onchange = () => { savePrefs(); renderCards(); };
+  $("csv").onclick = exportCsv;
+  $("activity").onclick = (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b) return;
+    state.act = state.act === b.dataset.act ? null : b.dataset.act; state.actData = null;
+    renderActivity(); loadActivity();
+  };
+  renderActivity();
   $("saveToken").onclick = () => { localStorage.setItem(TOKEN_KEY, $("token").value.trim()); state.autoStarted = false; load(); };
   $("token").onkeydown = (e) => { if (e.key === "Enter") $("saveToken").click(); };
   $("refreshAll").onclick = refreshAll;
@@ -620,7 +779,12 @@ function bind() {
   $("cards").onkeydown = (e) => { if (e.key === "Enter" && e.target.dataset.open) openDetail(e.target.dataset.open); };
   $("modal").onclick = (e) => {
     const t = e.target.closest("[data-tab]"), rb = e.target.closest("[data-refresh]");
-    if (t) { state.tab = t.dataset.tab; renderDetail(); }
+    const hr = e.target.closest("[data-hours]"), ctr = e.target.closest("[data-ctr]"), unit = e.target.closest("[data-unit]");
+    if (e.target.closest("[data-close-lookup]")) { state.ctr = null; state.unit = null; $("mbody").innerHTML = detailBody(currentView(), state.detail?.data); }
+    else if (hr) loadTrend(state.detailId, Number(hr.dataset.hours));
+    else if (ctr) lookup("containers", ctr.dataset.ctr);
+    else if (unit) lookup("units", unit.dataset.unit);
+    else if (t) { state.tab = t.dataset.tab; renderDetail(); }
     else if (rb && !rb.disabled) refreshOne(rb.dataset.refresh);
   };
   $("modal").oninput = (e) => {

@@ -23,8 +23,8 @@ use crate::{auth::TOKEN_HEADER, backups, scripts, servers, services, status};
 #[derive(OpenApi)]
 #[openapi(
     info(title = "service-maintainer", description = "Runs per-service bash scripts, reports Docker service status, lists / restores MongoDB backups and monitors servers over ssh."),
-    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status, backups::list_backups, backups::restore_backup, servers::list_servers, servers::get_server, servers::refresh_all, servers::refresh_server),
-    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health, backups::BackupList, backups::BackupFile, backups::RestoreRequest, backups::RestoreResult, servers::ServerList, servers::ServerView, servers::ServerSummary, servers::ServerStatus, servers::Level, servers::JobStatus, servers::Thresholds)),
+    paths(scripts::run_service_script, services::list_services, services::reload_service, status::services_status, backups::list_backups, backups::restore_backup, servers::list_servers, servers::get_server, servers::refresh_all, servers::refresh_server, servers::server_history, servers::list_audit, servers::alerts::list_alerts, servers::detail::container_detail, servers::detail::unit_detail),
+    components(schemas(scripts::RunResult, services::ServiceList, services::ServiceInfo, services::Health, backups::BackupList, backups::BackupFile, backups::RestoreRequest, backups::RestoreResult, servers::ServerList, servers::ServerView, servers::ServerSummary, servers::ServerStatus, servers::Level, servers::JobStatus, servers::Thresholds, servers::HistoryPoint, servers::HistoryResponse, servers::AuditEntry, servers::AuditList, servers::alerts::AlertEvent, servers::alerts::AlertKind, servers::alerts::AlertList)),
     modifiers(&SecurityToken),
     security(("security_token" = []))
 )]

@@ -16,6 +16,8 @@ pub struct Config {
     /// Public path prefix added by a reverse proxy, e.g. `/maintain` (`BASE_PATH`, default empty).
     /// Only used so Swagger UI and the spec point at the proxied URLs.
     pub base_path: String,
+    /// Settings of the Servers page (`SERVERS_*` variables).
+    pub servers: crate::servers::Settings,
 }
 
 impl Config {
@@ -48,6 +50,7 @@ impl Config {
                 .unwrap_or_else(|| "scripts".into())
                 .into(),
             base_path: normalize_base_path(&get("BASE_PATH").unwrap_or_default()),
+            servers: crate::servers::Settings::from_lookup(&get)?,
         })
     }
 }

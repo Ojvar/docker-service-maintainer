@@ -5,10 +5,14 @@
 # it never writes, never uses sudo and never prints command lines or environment variables.
 # Output: one JSON object. A section that can't be read is null and its name is listed in "unavailable".
 set +e
-export LC_ALL=C PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# PROBE_EXTRA_PATH / PROBE_DISABLE are test hooks (scripts/servers/test-probe.sh); they are never set over ssh.
+export LC_ALL=C PATH="${PROBE_EXTRA_PATH:+$PROBE_EXTRA_PATH:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 unavailable=()
-has() { command -v "$1" >/dev/null 2>&1; }
+has() {
+  [[ " ${PROBE_DISABLE:-} " == *" $1 "* ]] && return 1
+  command -v "$1" >/dev/null 2>&1
+}
 
 # JSON string (exact escaping in bash), or null for an empty value.
 js() {
@@ -26,9 +30,13 @@ function n(v){return (v ~ /^-?[0-9]+(\.[0-9]+)?$/) ? v : "null"}
 function r1(v){return sprintf("%.1f", v)}'
 
 # Two snapshots of /proc counters, 1 second apart, for CPU usage, disk I/O and network rates.
+# /proc/<pid>/stat is sampled too, so top processes show current CPU use (like top), not a lifetime average.
 snap_t1=$(date +%s%N); cpu1=$(head -1 /proc/stat); disk1=$(cat /proc/diskstats 2>/dev/null); net1=$(cat /proc/net/dev 2>/dev/null)
+procs1=$(cat /proc/[0-9]*/stat 2>/dev/null)
 sleep 1
 snap_t2=$(date +%s%N); cpu2=$(head -1 /proc/stat); disk2=$(cat /proc/diskstats 2>/dev/null); net2=$(cat /proc/net/dev 2>/dev/null)
+procs2=$(cat /proc/[0-9]*/stat 2>/dev/null)
+clk_tck=$(getconf CLK_TCK 2>/dev/null); [[ $clk_tck =~ ^[0-9]+$ ]] || clk_tck=100
 elapsed_ms=$(( (snap_t2 - snap_t1) / 1000000 )); (( elapsed_ms > 0 )) || elapsed_ms=1000
 
 sys_info() {
@@ -42,6 +50,8 @@ sys_info() {
   fi
   has ip && ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')
   [[ -n $ip ]] || ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  # Last resort: first non-loopback local IPv4 address from the kernel's FIB.
+  [[ -n $ip ]] || ip=$(awk '/\|-- /{a=$2} /\/32 host LOCAL/{ if(a !~ /^127\./){print a; exit} }' /proc/net/fib_trie 2>/dev/null)
   has systemd-detect-virt && virt=$(systemd-detect-virt 2>/dev/null)
   printf '{"hostname":%s,"fqdn":%s,"primary_ip":%s,"os":%s,"os_id":%s,"os_version":%s,"kernel":%s,"architecture":%s,"uptime_seconds":%s,"boot_time":%s,"virtualization":%s,"timezone":%s,"remote_time":%s,"logged_in_users":%s}' \
     "$(jsn "$short")" "$(jsn "$fqdn")" "$(jsn "$ip")" "$(jsn "$os")" "$(jsn "$os_id")" "$(jsn "$os_ver")" \
@@ -92,16 +102,28 @@ disks() {
     FNR>1 { mp=$7; for(i=8;i<=NF;i++) mp=mp " " $i
       if(seen[$1 SUBSEP mp]++) next
       pct=($3>0) ? r1(100*$4/$3) : "0"
-      printf "%s{\"filesystem\":%s,\"type\":%s,\"mount\":%s,\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"used_percent\":%s,\"inodes_used_percent\":%s}", (c++?",":""), e($1), e($2), e(mp), n($3), n($4), n($5), pct, n(ip[mp]) }' \
+      net=($2 ~ /^(cifs|smb3|smbfs|nfs|nfs4|ceph|glusterfs|9p|davfs|afs|lustre|beegfs|gpfs)$/ || $2 ~ /^fuse\./) ? "true" : "false"
+      printf "%s{\"filesystem\":%s,\"type\":%s,\"mount\":%s,\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"used_percent\":%s,\"inodes_used_percent\":%s,\"network\":%s}", (c++?",":""), e($1), e($2), e(mp), n($3), n($4), n($5), pct, n(ip[mp]), net }' \
     <(timeout 5 df -P -i -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x nsfs -x fuse.lxcfs 2>/dev/null) \
     <(timeout 5 df -P -T -B1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x nsfs -x fuse.lxcfs 2>/dev/null))
   [[ -n $out ]] && printf '[%s]' "$out"
 }
 
 block_devices() {
-  has lsblk || return
-  local out
-  out=$(lsblk -dnb -o NAME,SIZE,ROTA,TYPE 2>/dev/null | awk "$AWK_LIB"'$4=="disk"{printf "%s{\"name\":%s,\"size_bytes\":%s,\"rotational\":%s}", (c++?",":""), e($1), n($2), ($3=="1"?"true":"false")}')
+  local out="" d name size rota
+  if has lsblk; then
+    out=$(lsblk -dnb -o NAME,SIZE,ROTA,TYPE 2>/dev/null | awk "$AWK_LIB"'$4=="disk"{printf "%s{\"name\":%s,\"size_bytes\":%s,\"rotational\":%s}", (c++?",":""), e($1), n($2), ($3=="1"?"true":"false")}')
+  fi
+  if [[ -z $out && -d /sys/block ]]; then
+    # Fallback without lsblk: /sys/block/<dev>/size is in 512-byte sectors.
+    for d in /sys/block/*; do
+      name=${d##*/}
+      [[ $name =~ ^(loop|ram|zram|sr|fd|dm-|md) ]] && continue
+      size=$(cat "$d/size" 2>/dev/null); rota=$(cat "$d/queue/rotational" 2>/dev/null)
+      [[ $size =~ ^[0-9]+$ ]] || continue
+      out+="${out:+,}{\"name\":$(js "$name"),\"size_bytes\":$((size * 512)),\"rotational\":$([[ $rota == 1 ]] && echo true || echo false)}"
+    done
+  fi
   [[ -n $out ]] && printf '[%s]' "$out"
 }
 
@@ -121,9 +143,28 @@ disk_io() {
   [[ -n $out ]] && printf '[%s]' "$out"
 }
 
+# Same line format as `ip -o link`, built from /sys/class/net when `ip` is missing.
+links_fallback() {
+  local d n st mtu mac
+  for d in /sys/class/net/*; do
+    n=${d##*/}
+    st=$(tr '[:lower:]' '[:upper:]' < "$d/operstate" 2>/dev/null); mtu=$(cat "$d/mtu" 2>/dev/null); mac=$(cat "$d/address" 2>/dev/null)
+    printf '0: %s: <> mtu %s state %s link/ether %s\n' "$n" "${mtu:-0}" "${st:-UNKNOWN}" "${mac:-00:00:00:00:00:00}"
+  done
+}
+# Same line format as `ip -o addr`, from ifconfig (both net-tools output styles) when `ip` is missing.
+addrs_fallback() {
+  has ifconfig || return
+  ifconfig -a 2>/dev/null | awk '
+    /^[^ \t]/ { nm=$1; sub(/:$/,"",nm) }
+    $1=="inet" || $1=="inet6" { a=$2; sub(/^addr:/,"",a); if(a!="") print "0: " nm " " $1 " " a }'
+}
 network() {
-  local ifaces gw gw_dev dns search upstream veth
-  ifaces=$( { has ip && ip -o link show 2>/dev/null; echo "@@L"; has ip && ip -o addr show 2>/dev/null; echo "@@A"; echo "$net1"; echo "@@D"; echo "$net2"; } | awk -v ms="$elapsed_ms" "$AWK_LIB"'
+  local ifaces gw gw_dev dns search upstream veth links addrs
+  if has ip; then links=$(ip -o link show 2>/dev/null); addrs=$(ip -o addr show 2>/dev/null)
+  else links=$(links_fallback); addrs=$(addrs_fallback)
+  fi
+  ifaces=$( { echo "$links"; echo "@@L"; echo "$addrs"; echo "@@A"; echo "$net1"; echo "@@D"; echo "$net2"; } | awk -v ms="$elapsed_ms" "$AWK_LIB"'
     $1=="@@L"{sec=1; next} $1=="@@A"{sec=2; next} $1=="@@D"{sec=3; next}
     sec==0 { nm=$2; sub(/:$/,"",nm); sub(/@.*/,"",nm); if(nm ~ /^veth/) next
       if(!(nm in seen)){seen[nm]=1; order[++k]=nm}
@@ -144,6 +185,10 @@ network() {
   veth=$(awk -F: 'NR>2{gsub(/ /,"",$1); if($1 ~ /^veth/) c++} END{print c+0}' <<<"$net2")
   if has ip; then
     read -r gw gw_dev < <(ip route show default 2>/dev/null | awk '{g="";d=""; for(i=1;i<NF;i++){if($i=="via")g=$(i+1); if($i=="dev")d=$(i+1)} print g, d; exit}')
+  elif [[ -r /proc/net/route ]]; then
+    # Default route from /proc/net/route: gateway is little-endian hex.
+    read -r gw gw_dev < <(awk 'function hx(s,  i,v){v=0; for(i=1;i<=length(s);i++) v=v*16+index("0123456789ABCDEF", toupper(substr(s,i,1)))-1; return v}
+      NR>1 && $2=="00000000" { h=$3; printf "%d.%d.%d.%d %s\n", hx(substr(h,7,2)), hx(substr(h,5,2)), hx(substr(h,3,2)), hx(substr(h,1,2)), $1; exit }' /proc/net/route 2>/dev/null)
   fi
   if [[ -r /etc/resolv.conf ]]; then
     dns=$(awk '$1=="nameserver"{printf "%s\"%s\"", (c++?",":""), $2}' /etc/resolv.conf)
@@ -157,6 +202,25 @@ network() {
     "$ifaces" "$(num "$veth")" "$(jsn "$gw")" "$(jsn "$gw_dev")" "$dns" "$search" "$upstream"
 }
 
+# Top 10 processes by CPU over the 1 s sample (percent of one core, like top), as JSON objects.
+top_cpu_sampled() {
+  [[ -n $procs1 && -n $procs2 ]] || return
+  local rows pids
+  # /proc/<pid>/stat: pid (comm) state ...; utime/stime are fields 14/15 (12/13 after the last ")").
+  rows=$( { echo "$procs1"; echo "@@"; echo "$procs2"; } | awk -v hz="$clk_tck" -v ms="$elapsed_ms" '
+    $1=="@@" { second=1; next }
+    { line=$0; i=index(line, "("); n=split(line, a, ")"); rest=a[n]
+      name=substr(line, i+1, length(line)-length(rest)-i-1); split(rest, f, " "); t=f[12]+f[13]; pid=$1
+      if(!second){ t1[pid]=t; next }
+      if(pid in t1){ d=t-t1[pid]; if(d>0){ gsub(/\t/," ",name); printf "%s\t%.1f\t%s\n", pid, d*100000/(hz*ms), name } } }' | sort -t$'\t' -k2,2 -rn | head -10)
+  [[ -n $rows ]] || return
+  pids=$(cut -f1 <<<"$rows" | paste -sd, -)
+  { ps -o pid=,user:20=,pmem=,rss=,etime= -p "$pids" 2>/dev/null; echo "@@"; echo "$rows"; } | awk -F'\t' "$AWK_LIB"'
+    $0=="@@" { second=1; next }
+    !second { split($0, p, " "); u[p[1]]=p[2]; m[p[1]]=p[3]; r[p[1]]=p[4]; el[p[1]]=p[5]; next }
+    { pid=$1; printf "%s{\"pid\":%s,\"user\":%s,\"cpu_percent\":%s,\"mem_percent\":%s,\"rss_bytes\":%s,\"elapsed\":%s,\"name\":%s}", (c++?",":""), n(pid), (pid in u ? e(u[pid]) : "null"), n($2), n(m[pid]), (pid in r ? n(r[pid]*1024) : "null"), (pid in el ? e(el[pid]) : "null"), e($3) }'
+}
+
 health() {
   local la procs threads zombies top_cpu top_mem
   read -r l1 l5 l15 rt _ < /proc/loadavg
@@ -165,10 +229,15 @@ health() {
   zombies=$(ps -eo stat= 2>/dev/null | grep -c '^Z')
   # comm (name only), never full command lines: those can carry secrets.
   local ps_awk="$AWK_LIB"'NR>1 && NR<=11 {printf "%s{\"pid\":%s,\"user\":%s,\"cpu_percent\":%s,\"mem_percent\":%s,\"rss_bytes\":%s,\"elapsed\":%s,\"name\":%s}", (c++?",":""), n($1), e($2), n($3), n($4), n($5*1024), e($6), e($7)}'
-  top_cpu=$(ps -eo pid,user:20,pcpu,pmem,rss,etime,comm --sort=-pcpu 2>/dev/null | awk "$ps_awk")
+  local mode=sampled
+  top_cpu=$(top_cpu_sampled)
+  if [[ -z $top_cpu ]]; then
+    mode=lifetime
+    top_cpu=$(ps -eo pid,user:20,pcpu,pmem,rss,etime,comm --sort=-pcpu 2>/dev/null | awk "$ps_awk")
+  fi
   top_mem=$(ps -eo pid,user:20,pcpu,pmem,rss,etime,comm --sort=-rss 2>/dev/null | awk "$ps_awk")
-  printf '{"load_1":%s,"load_5":%s,"load_15":%s,"processes":%s,"running_processes":%s,"threads":%s,"zombie_processes":%s,"top_cpu":[%s],"top_memory":[%s]}' \
-    "$(num "$l1")" "$(num "$l5")" "$(num "$l15")" "$(num "$procs")" "$(num "$running")" "$(num "$threads")" "$(num "$zombies")" "$top_cpu" "$top_mem"
+  printf '{"load_1":%s,"load_5":%s,"load_15":%s,"processes":%s,"running_processes":%s,"threads":%s,"zombie_processes":%s,"top_cpu_mode":"%s","top_cpu":[%s],"top_memory":[%s]}' \
+    "$(num "$l1")" "$(num "$l5")" "$(num "$l15")" "$(num "$procs")" "$(num "$running")" "$(num "$threads")" "$(num "$zombies")" "$mode" "$top_cpu" "$top_mem"
 }
 
 temperatures() {
@@ -177,7 +246,7 @@ temperatures() {
     [[ -r $z/temp ]] || continue
     t=$(cat "$z/temp" 2>/dev/null); label=$(cat "$z/type" 2>/dev/null)
     [[ $t =~ ^-?[0-9]+$ ]] && (( t > -50000 && t < 150000 )) || continue
-    out+="${out:+,}{\"sensor\":$(jsn "${label:-${z##*/}}"),\"celsius\":$(awk -v t="$t" 'BEGIN{printf "%.1f", t/1000}')}"
+    out+="${out:+,}{\"sensor\":$(jsn "${label:-${z##*/}}"),\"celsius\":$(awk -v t="$t" 'BEGIN{printf "%.1f", t/1000}'),\"source\":\"thermal\"}"
   done
   for h in /sys/class/hwmon/hwmon*; do
     name=$(cat "$h/name" 2>/dev/null)
@@ -185,9 +254,16 @@ temperatures() {
       [[ -r $f ]] || continue
       t=$(cat "$f" 2>/dev/null); label=$(cat "${f%_input}_label" 2>/dev/null)
       [[ $t =~ ^-?[0-9]+$ ]] && (( t > -50000 && t < 150000 )) || continue
-      out+="${out:+,}{\"sensor\":$(jsn "${name:-hwmon}${label:+ $label}"),\"celsius\":$(awk -v t="$t" 'BEGIN{printf "%.1f", t/1000}')}"
+      out+="${out:+,}{\"sensor\":$(jsn "${name:-hwmon}${label:+ $label}"),\"celsius\":$(awk -v t="$t" 'BEGIN{printf "%.1f", t/1000}'),\"source\":\"hwmon\"}"
     done
   done
+  if [[ -z $out ]] && has sensors; then
+    # lm-sensors fallback: chip lines, "Label:" lines, then "  tempN_input: 45.000".
+    out=$(timeout 5 sensors -u 2>/dev/null | awk "$AWK_LIB"'
+      /^[^ \t].*:$/ { label=substr($0, 1, length($0)-1); next }
+      /^[^ \t]/ && $0 !~ /:/ { chip=$0; label=""; next }
+      /^[ \t]+temp[0-9]+_input:/ { v=$2+0; if(v>-50 && v<150) printf "%s{\"sensor\":%s,\"celsius\":%.1f,\"source\":\"sensors\"}", (c++?",":""), e(chip (label!="" ? " " label : "")), v }')
+  fi
   [[ -n $out ]] && printf '[%s]' "$out"
 }
 
