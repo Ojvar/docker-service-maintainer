@@ -1,0 +1,20 @@
+# Build context: Cargo.toml, Cargo.lock, src/, templates/ and scripts/ (baked into the image).
+target/
+scripts.bak.*/
+scripts.bak.*
+data/
+deploy-draft/
+docs/
+.git/
+.gitignore
+.gitlab-ci.yml
+.env
+.env.*
+!.env.example
+*.bak.*
+*.md
+Dockerfile
+.dockerignore
+**/*.rs.bk
+.idea/
+.vscode/

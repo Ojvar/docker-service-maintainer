@@ -1,0 +1,99 @@
+version: "3.9"
+
+# service-maintainer: token-protected admin API that runs the per-service bash scripts
+# (docker service/stack commands, ssh to the backup host and monitored servers).
+# Deployed as a Swarm stack like every other stack on this host:  bash ./deploy.sh
+# Public URL: https://api.qeng.ir/maintain  (Traefik docker/swarm provider, labels below)
+
+networks:
+  server-net:
+    external: true
+
+services:
+  service-maintainer:
+    image: docker.qeng.ir/qeng/service-maintainer:0.1.1   # bump on every release (docker service ls shows what runs)
+    hostname: service-maintainer
+    env_file:
+      - ./.env                      # SECURITY_TOKEN, BACKUP_*, SERVERS_* (chmod 600, not in the image)
+    environment:
+      - HOST=0.0.0.0
+      - PORT=18080
+      - SCRIPTS_DIR=/app/scripts      # bundled in the image (not mounted)
+      - SERVERS_DATA_DIR=/app/data
+      - TZ=Asia/Tehran
+    # qeng (uid 1000) so the mounted ssh key / docker config (mode 600) are readable;
+    # primary group docker (gid 994 on this host) for /var/run/docker.sock.
+    user: "1000:994"
+    networks:
+      - server-net
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # persisted server-monitoring state/history/alerts/audit
+      - /opt/docker-data/service-maintainer/data:/app/data:rw
+      # scripts drive the local Swarm manager: docker service ls/update, docker stack deploy/rm
+      - /var/run/docker.sock:/var/run/docker.sock
+      # restart-*.sh scripts: cd /opt/docker-deployer/... && bash ./deploy.sh
+      - /opt/docker-deployer:/opt/docker-deployer:ro
+      # env_file paths referenced by those stacks' compose files are read by the docker CLI
+      - /opt/docker-data/dotenvs:/opt/docker-data/dotenvs:ro
+      # --with-registry-auth (docker.qeng.ir login) used by every deploy.sh
+      - /home/qeng/.docker/config.json:/home/qeng/.docker/config.json:ro
+      # ssh to the backup host and monitored servers (same paths as on the host)
+      - /home/qeng/.ssh/id_qeng_2027:/home/qeng/.ssh/id_qeng_2027:ro
+      - /home/qeng/.ssh/known_hosts:/home/qeng/.ssh/known_hosts:ro
+    stop_grace_period: 60s          # graceful shutdown: let a running script/restore finish
+    healthcheck:
+      # /api/openapi.json is public and served by the app itself
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:18080/api/openapi.json"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=server-net"
+        - "traefik.http.services.service-maintainer.loadbalancer.server.port=18080"
+
+        - "traefik.http.middlewares.service-maintainer-strip-prefix.stripprefix.prefixes=/maintain"
+
+        - "traefik.http.routers.service-maintainer.entrypoints=http"
+        - "traefik.http.routers.service-maintainer.rule=(Host(`api.qeng.ir`) && PathPrefix(`/maintain`))"
+        - "traefik.http.routers.service-maintainer.service=service-maintainer"
+        - "traefik.http.routers.service-maintainer.middlewares=service-maintainer-strip-prefix"
+        - "traefik.http.routers.service-maintainer.priority=100"
+
+        - "traefik.http.routers.service-maintainer-secure.entrypoints=https"
+        - "traefik.http.routers.service-maintainer-secure.rule=(Host(`api.qeng.ir`) && PathPrefix(`/maintain`))"
+        - "traefik.http.routers.service-maintainer-secure.tls=true"
+        - "traefik.http.routers.service-maintainer-secure.tls.options=default"
+        - "traefik.http.routers.service-maintainer-secure.service=service-maintainer"
+        - "traefik.http.routers.service-maintainer-secure.middlewares=service-maintainer-strip-prefix"
+        # higher than the old file router (default priority = rule length) so this wins during cutover
+        - "traefik.http.routers.service-maintainer-secure.priority=100"
+      mode: replicated
+      replicas: 1                   # exactly one: scripts restart stacks / restore DBs
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
+      placement:
+        constraints:
+          # needs this host's Swarm-manager docker.sock and the host paths mounted above
+          - node.hostname == api.qeng.ir
+        max_replicas_per_node: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first           # never two instances running scripts at once
+        monitor: 30s
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s

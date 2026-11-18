@@ -142,8 +142,37 @@ async fn main() {
         listener,
         app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("server error");
+    println!("service-maintainer stopped");
+}
+
+/// Resolves on SIGTERM (`docker stop`, `systemctl stop`) or Ctrl+C, so `axum::serve`
+/// stops accepting connections and lets in-flight requests finish before exiting.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                eprintln!("cannot install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    println!("shutdown signal received, finishing in-flight requests");
 }
 
 /// Minimal self-deleting temp directory, so tests need no extra crate.
